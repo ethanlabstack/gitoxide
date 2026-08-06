@@ -25,6 +25,10 @@ const V2_SECTION_MESSAGES: &str = "messages";
 #[cfg(feature = "async-client")]
 pub mod async_io;
 
+/// Server-side receive-pack handler implementing pack ingestion, connectivity checking,
+/// and atomic ref transactions for one push session.
+pub mod handler;
+
 /// A parsed receive-pack capability from the first update command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capability {

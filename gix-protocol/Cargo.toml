@@ -43,6 +43,7 @@ async-client = [
 blocking-server = [
     "gix-transport/blocking-client",
     "dep:gix-object",
+    "dep:gix-odb",
     "dep:gix-pack",
     "dep:gix-traverse",
     "dep:gix-zlib",
@@ -56,6 +57,7 @@ async-server = [
     "dep:futures-io",
     "futures-lite",
     "dep:gix-object",
+    "dep:gix-odb",
     "dep:gix-pack",
     "dep:gix-traverse",
     "dep:gix-zlib",
@@ -117,6 +119,7 @@ gix-trace = { version = "^0.1.21", path = "../gix-trace", optional = true }
 gix-negotiate = { version = "^0.34.0", path = "../gix-negotiate", optional = true }
 gix-object = { version = "^0.63.0", path = "../gix-object", optional = true }
 gix-revwalk = { version = "^0.34.0", path = "../gix-revwalk", optional = true }
+gix-odb = { version = "^0.83.0", path = "../gix-odb", optional = true }
 gix-pack = { version = "^0.73.0", path = "../gix-pack", optional = true }
 gix-traverse = { version = "^0.60.0", path = "../gix-traverse", optional = true }
 gix-zlib = { version = "^0.1.0", path = "../gix-zlib", optional = true }
