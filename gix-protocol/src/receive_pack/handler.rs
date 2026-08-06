@@ -608,6 +608,75 @@ impl ReceivePackHandler {
 }
 
 // ---------------------------------------------------------------------------
+// Ref transaction
+// ---------------------------------------------------------------------------
+
+impl ReceivePackHandler {
+    /// Execute an atomic ref transaction for the given updates.
+    ///
+    /// Maps each [`Update`](super::Update) to a [`RefEdit`](gix_ref::transaction::RefEdit)
+    /// and executes them as a single atomic transaction via the ref store.
+    ///
+    /// Requires a prior successful [`ingest_pack`](Self::ingest_pack) call (state must be
+    /// [`SessionState::PackIngested`]).
+    ///
+    /// On success, removes the `.keep` file created during pack ingestion and
+    /// transitions the session state to [`SessionState::Committed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransactError::NotIngested`] if the handler is not in the `PackIngested` state.
+    /// Returns [`TransactError::Prepare`] if the transaction preparation fails (e.g., CAS mismatch).
+    /// Returns [`TransactError::Commit`] if the transaction commit fails.
+    /// Returns [`TransactError::KeepFileRemoval`] if the `.keep` file cannot be removed after success.
+    pub fn transact_refs(&mut self, updates: &[super::Update]) -> Result<TransactionResult, TransactError> {
+        if self.state != SessionState::PackIngested {
+            return Err(TransactError::NotIngested);
+        }
+
+        // Map all updates to RefEdits.
+        let edits: Vec<gix_ref::transaction::RefEdit> = updates.iter().map(update_to_ref_edit).collect();
+
+        // Execute the transaction: prepare then commit.
+        let prepared = self
+            .ref_store
+            .transaction()
+            .prepare(
+                edits,
+                gix_lock::acquire::Fail::Immediately,
+                gix_lock::acquire::Fail::Immediately,
+            )
+            .map_err(|e| TransactError::Prepare(Box::new(e)))?;
+
+        prepared
+            .commit(None)
+            .map_err(|e| TransactError::Commit(Box::new(e)))?;
+
+        // Remove the .keep file.
+        if let Some(keep_path) = self.ingest_outcome.as_ref().and_then(|o| o.keep_path.as_ref()) {
+            std::fs::remove_file(keep_path).map_err(|source| TransactError::KeepFileRemoval {
+                path: keep_path.clone(),
+                source,
+            })?;
+        }
+
+        // Transition state to Committed.
+        self.state = SessionState::Committed;
+
+        // Build per-ref results — all Ok on success.
+        let ref_results = updates
+            .iter()
+            .map(|update| RefUpdateResult {
+                ref_name: update.ref_name.clone(),
+                status: RefUpdateStatus::Ok,
+            })
+            .collect();
+
+        Ok(TransactionResult { ref_results })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Result types
 // ---------------------------------------------------------------------------
 
@@ -1609,6 +1678,118 @@ mod tests {
             );
 
             Ok(())
+        }
+    }
+
+    mod ref_edit_mapping_properties {
+        use crate::receive_pack::Update;
+        use crate::receive_pack::handler::update_to_ref_edit;
+        use proptest::prelude::*;
+
+        // Feature: async-receive-pack-handler, Property 1: Update-to-RefEdit mapping preserves semantics
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(100))]
+            #[test]
+            fn update_to_ref_edit_mapping_preserves_semantics(
+                old_is_null in any::<bool>(),
+                new_is_null in any::<bool>(),
+                random_old in any::<[u8; 20]>(),
+                random_new in any::<[u8; 20]>(),
+            ) {
+                use gix_ref::transaction::{Change, PreviousValue};
+                use gix_ref::Target;
+
+                // Construct old_id and new_id based on the bool flags.
+                let old_id = if old_is_null {
+                    gix_hash::ObjectId::null(gix_hash::Kind::Sha1)
+                } else {
+                    gix_hash::ObjectId::from_bytes_or_panic(&random_old)
+                };
+                let new_id = if new_is_null {
+                    gix_hash::ObjectId::null(gix_hash::Kind::Sha1)
+                } else {
+                    gix_hash::ObjectId::from_bytes_or_panic(&random_new)
+                };
+
+                // Skip the case where both are null (invalid in protocol terms).
+                if old_is_null && new_is_null {
+                    return Ok(());
+                }
+
+                let update = Update {
+                    old_id,
+                    new_id,
+                    ref_name: "refs/heads/test".into(),
+                };
+
+                let ref_edit = update_to_ref_edit(&update);
+
+                if new_is_null {
+                    // Deletion case: old_id non-null, new_id null.
+                    match &ref_edit.change {
+                        Change::Delete { expected, .. } => {
+                            prop_assert_eq!(
+                                expected,
+                                &PreviousValue::MustExistAndMatch(Target::Object(old_id)),
+                                "deletion should have MustExistAndMatch(old_id)"
+                            );
+                        }
+                        other => {
+                            prop_assert!(
+                                false,
+                                "expected Change::Delete for deletion, got: {:?}",
+                                other
+                            );
+                        }
+                    }
+                } else if old_is_null {
+                    // Creation case: old_id null, new_id non-null.
+                    match &ref_edit.change {
+                        Change::Update { expected, new, .. } => {
+                            prop_assert_eq!(
+                                expected,
+                                &PreviousValue::MustNotExist,
+                                "creation should have MustNotExist"
+                            );
+                            prop_assert_eq!(
+                                new,
+                                &Target::Object(new_id),
+                                "creation target should be new_id"
+                            );
+                        }
+                        other => {
+                            prop_assert!(
+                                false,
+                                "expected Change::Update for creation, got: {:?}",
+                                other
+                            );
+                        }
+                    }
+                } else {
+                    // Normal update case: both non-null.
+                    match &ref_edit.change {
+                        Change::Update { expected, new, .. } => {
+                            prop_assert_eq!(
+                                expected,
+                                &PreviousValue::MustExistAndMatch(Target::Object(old_id)),
+                                "normal update should have MustExistAndMatch(old_id)"
+                            );
+                            prop_assert_eq!(
+                                new,
+                                &Target::Object(new_id),
+                                "normal update target should be new_id"
+                            );
+                        }
+                        other => {
+                            prop_assert!(
+                                false,
+                                "expected Change::Update for normal update, got: {:?}",
+                                other
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 }

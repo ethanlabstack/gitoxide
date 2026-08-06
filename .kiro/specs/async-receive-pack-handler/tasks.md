@@ -124,13 +124,13 @@ Implement a synchronous `ReceivePackHandler` in the `gix-protocol` crate's `rece
     - Map `old_id ≠ zero, new_id = zero` → `Change::Delete` + `MustExistAndMatch(old_id)`
     - _Requirements: 3.1, 3.2, 3.3_
 
-  - [~] 6.2 Write property test for Update-to-RefEdit mapping (Property 1)
+  - [x] 6.2 Write property test for Update-to-RefEdit mapping (Property 1)
     - **Property 1: Update-to-RefEdit mapping preserves semantics**
     - Generate random `Update` commands with varied zero/non-zero id combinations
     - Assert produced `RefEdit` matches expected `Change` variant and `PreviousValue`
     - **Validates: Requirements 3.1, 3.2, 3.3**
 
-  - [~] 6.3 Implement `ReceivePackHandler::transact_refs`
+  - [x] 6.3 Implement `ReceivePackHandler::transact_refs`
     - Accept `updates: &[Update]`
     - Verify state is `PackIngested` (return `NotIngested` otherwise)
     - Map all updates to `RefEdit` operations using the mapping from 6.1

@@ -47,6 +47,7 @@ blocking-server = [
     "dep:gix-pack",
     "dep:gix-traverse",
     "dep:gix-zlib",
+    "dep:gix-lock",
 ]
 ## If set, async server-side upload-pack plumbing is available for in-process transports.
 # no `dep:` for futures-lite (https://github.com/rust-secure-code/cargo-auditable/issues/124)
