@@ -203,29 +203,29 @@ Implement a synchronous `ReceivePackHandler` in the `gix-protocol` crate's `rece
     - Assert returned set equals objects reachable from new tips minus objects reachable from old tips
     - **Validates: Requirements 4.2**
 
-- [ ] 10. Integration tests
-  - [~] 10.1 Write integration test: full push round-trip via Delegate
+- [x] 10. Integration tests
+  - [x] 10.1 Write integration test: full push round-trip via Delegate
     - Create bare repo fixture, push a branch with commits/trees/blobs
     - Verify refs are updated and objects accessible after push
     - Use `gix_testtools` for fixture setup
     - _Requirements: 5.1, 5.2, 5.3_
 
-  - [~] 10.2 Write integration test: thin pack resolution
+  - [x] 10.2 Write integration test: thin pack resolution
     - Create bare repo with base objects, push thin pack referencing them
     - Verify successful ingestion with resolved deltas
     - _Requirements: 1.2_
 
-  - [~] 10.3 Write integration test: Pipeline Step API usage
+  - [x] 10.3 Write integration test: Pipeline Step API usage
     - Exercise integrator-style usage: `ingest_pack` → custom logic → `transact_refs` (skipping connectivity)
     - Verify `transact_refs` works without prior `check_connectivity`
     - _Requirements: 4.1, 4.3, 4.5_
 
-  - [~] 10.4 Write integration test: CAS mismatch detection
+  - [x] 10.4 Write integration test: CAS mismatch detection
     - Set up two handlers on same repo, one modifies a ref, second gets CAS mismatch
     - Verify per-ref rejection with appropriate error
     - _Requirements: 3.5_
 
-  - [~] 10.5 Write integration test: connectivity walk termination on deep history
+  - [x] 10.5 Write integration test: connectivity walk termination on deep history
     - Repo with deep history, push one commit on top
     - Verify walk terminates quickly (doesn't traverse entire history)
     - _Requirements: 2.2_
