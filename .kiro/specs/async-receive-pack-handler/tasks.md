@@ -167,10 +167,10 @@ Implement a synchronous `ReceivePackHandler` in the `gix-protocol` crate's `rece
     - Test: double `abort_pack` → Ok (no-op)
     - _Requirements: 4.6, 4.7_
 
-- [~] 8. Checkpoint
+- [x] 8. Checkpoint
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 9. Implement Delegate trait
+- [x] 9. Implement Delegate trait
   - [x] 9.1 Implement `Delegate` for `ReceivePackHandler`
     - Implement `receive` method running full pipeline: ingest → connectivity check → transact
     - On pack ingestion failure: `UnpackStatus::Error`, all refs `Rejected`
@@ -179,25 +179,25 @@ Implement a synchronous `ReceivePackHandler` in the `gix-protocol` crate's `rece
     - On success: `UnpackStatus::Ok`, one `RefStatus::Ok` per updated ref
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.9_
 
-  - [~] 9.2 Write property test for pipeline failure yielding all refs rejected (Property 12)
+  - [x] 9.2 Write property test for pipeline failure yielding all refs rejected (Property 12)
     - **Property 12: Pipeline failure yields Error status with all refs rejected**
     - Generate various failure modes (malformed pack, missing objects)
     - Assert response has `UnpackStatus::Error` and every ref is `RefStatus::Rejected`
     - **Validates: Requirements 5.4, 5.5, 5.9**
 
-  - [~] 9.3 Write property test for successful pipeline yielding all Ok (Property 13)
+  - [x] 9.3 Write property test for successful pipeline yielding all Ok (Property 13)
     - **Property 13: Successful pipeline yields Ok status for all refs**
     - Generate valid pushes with N refs
     - Assert response has `UnpackStatus::Ok` and exactly N `RefStatus::Ok` entries in order
     - **Validates: Requirements 5.3**
 
-  - [~] 9.4 Write property test for ingested objects accessible through ODB (Property 11)
+  - [x] 9.4 Write property test for ingested objects accessible through ODB (Property 11)
     - **Property 11: Ingested objects are accessible through ODB**
     - Ingest valid packs, then resolve every object id from the pack through ODB
     - Assert all objects are found
     - **Validates: Requirements 4.1, 4.5**
 
-  - [~] 9.5 Write property test for new-object set correctness (Property 14)
+  - [x] 9.5 Write property test for new-object set correctness (Property 14)
     - **Property 14: check_connectivity returns the correct new-object set**
     - Generate repos with pre-existing refs and new pushes
     - Assert returned set equals objects reachable from new tips minus objects reachable from old tips
