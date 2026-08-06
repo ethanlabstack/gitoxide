@@ -46,7 +46,7 @@ Implement a synchronous `ReceivePackHandler` in the `gix-protocol` crate's `rece
     - Use `gix_testtools` for fixture creation
     - _Requirements: 5.7_
 
-- [ ] 3. Implement pack ingestion (`ingest_pack`)
+- [x] 3. Implement pack ingestion (`ingest_pack`)
   - [x] 3.1 Implement `ReceivePackHandler::ingest_pack`
     - Accept `pack_data: &mut dyn io::Read`
     - Verify state is `Fresh` (error if not)
@@ -58,29 +58,29 @@ Implement a synchronous `ReceivePackHandler` in the `gix-protocol` crate's `rece
     - Ensure atomic file operations (tempfiles only persist on success)
     - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7_
 
-  - [~] 3.2 Write property test for malformed pack producing no artifacts (Property 2)
+  - [x] 3.2 Write property test for malformed pack producing no artifacts (Property 2)
     - **Property 2: Malformed pack produces error with no filesystem artifacts**
     - Generate random invalid byte sequences as pack data
     - Assert `ingest_pack` returns error AND no new `.pack`, `.idx`, or `.keep` files appear in objects dir
     - **Validates: Requirements 1.6, 1.7**
 
-  - [~] 3.3 Write property test for non-empty pack producing complete file set (Property 4)
+  - [x] 3.3 Write property test for non-empty pack producing complete file set (Property 4)
     - **Property 4: Non-empty pack ingestion produces complete file set**
     - Generate valid packs with 1+ objects
     - Assert outcome has `Some` for `data_path`, `index_path`, and `keep_path`, and files exist on disk
     - **Validates: Requirements 1.4**
 
-  - [~] 3.4 Write property test for thin pack with resolvable bases (Property 3)
+  - [x] 3.4 Write property test for thin pack with resolvable bases (Property 3)
     - **Property 3: Thin pack with resolvable bases ingests successfully**
     - Create repos with known base objects, generate thin packs referencing them
     - Assert `ingest_pack` succeeds and written pack index accounts for all objects
     - **Validates: Requirements 1.2**
 
-- [~] 4. Checkpoint
+- [x] 4. Checkpoint
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 5. Implement connectivity check (`check_connectivity`)
-  - [~] 5.1 Implement `ReceivePackHandler::check_connectivity`
+- [x] 5. Implement connectivity check (`check_connectivity`)
+  - [x] 5.1 Implement `ReceivePackHandler::check_connectivity`
     - Accept `updates: &[Update]`
     - Verify state is `PackIngested` (return `NotIngested` otherwise)
     - Skip updates where `new_id` is zero (deletions)
@@ -93,32 +93,32 @@ Implement a synchronous `ReceivePackHandler` in the `gix-protocol` crate's `rece
     - On success: return `ConnectivityResult` with the set of new object ids
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6_
 
-  - [~] 5.2 Write property test for connectivity on complete graphs (Property 5)
+  - [x] 5.2 Write property test for connectivity on complete graphs (Property 5)
     - **Property 5: Connectivity check succeeds on complete object graphs**
     - Generate random DAGs of commit/tree/blob objects where all are present in ODB
     - Assert `check_connectivity` returns Ok
     - **Validates: Requirements 2.1, 2.4**
 
-  - [~] 5.3 Write property test for deletion updates excluded (Property 7)
+  - [x] 5.3 Write property test for deletion updates excluded (Property 7)
     - **Property 7: Deletion updates are excluded from connectivity checking**
     - Generate random updates with some `new_id = zero`
     - Assert those updates never trigger object lookup (connectivity check skips them)
     - **Validates: Requirements 2.5**
 
-  - [~] 5.4 Write property test for submodule entries skipped (Property 8)
+  - [x] 5.4 Write property test for submodule entries skipped (Property 8)
     - **Property 8: Submodule tree entries do not trigger missing-object errors**
     - Generate trees containing entries with commit mode (gitlinks)
     - Assert no missing-object error for those entries
     - **Validates: Requirements 2.6**
 
-  - [~] 5.5 Write property test for connectivity walk termination at pre-existing tips (Property 6)
+  - [x] 5.5 Write property test for connectivity walk termination at pre-existing tips (Property 6)
     - **Property 6: Connectivity walk terminates at pre-existing ref tips**
     - Generate object graphs where new commits have ancestors reachable from pre-existing refs
     - Assert walk stops at those ancestors and does not require objects below them
     - **Validates: Requirements 2.2**
 
 - [ ] 6. Implement atomic ref transaction (`transact_refs`)
-  - [~] 6.1 Implement Update-to-RefEdit mapping logic
+  - [x] 6.1 Implement Update-to-RefEdit mapping logic
     - Map `old_id ≠ zero, new_id ≠ zero` → `Change::Update` + `MustExistAndMatch(old_id)`
     - Map `old_id = zero, new_id ≠ zero` → `Change::Update` + `MustNotExist`
     - Map `old_id ≠ zero, new_id = zero` → `Change::Delete` + `MustExistAndMatch(old_id)`

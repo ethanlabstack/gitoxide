@@ -656,6 +656,52 @@ pub struct TransactionResult {
     pub ref_results: Vec<RefUpdateResult>,
 }
 
+// ---------------------------------------------------------------------------
+// Update → RefEdit mapping
+// ---------------------------------------------------------------------------
+
+/// Map a push [`Update`](super::Update) command to a [`gix_ref::transaction::RefEdit`].
+///
+/// The mapping logic:
+/// - `old_id` non-null, `new_id` non-null → `Change::Update` with `MustExistAndMatch(old_id)`
+/// - `old_id` null, `new_id` non-null → `Change::Update` with `MustNotExist`
+/// - `old_id` non-null, `new_id` null → `Change::Delete` with `MustExistAndMatch(old_id)`
+pub(crate) fn update_to_ref_edit(update: &super::Update) -> gix_ref::transaction::RefEdit {
+    use gix_ref::transaction::{Change, LogChange, PreviousValue, RefEdit};
+    use gix_ref::Target;
+
+    let name = gix_ref::FullName::try_from(update.ref_name.clone())
+        .expect("ref names from the protocol layer should be valid fully-qualified reference names");
+
+    let change = if update.new_id.is_null() {
+        // Deletion: old_id is non-null, new_id is null.
+        Change::Delete {
+            expected: PreviousValue::MustExistAndMatch(Target::Object(update.old_id)),
+            log: gix_ref::transaction::RefLog::AndReference,
+        }
+    } else if update.old_id.is_null() {
+        // Creation: old_id is null, new_id is non-null.
+        Change::Update {
+            log: LogChange::default(),
+            expected: PreviousValue::MustNotExist,
+            new: Target::Object(update.new_id),
+        }
+    } else {
+        // Normal update: both old_id and new_id are non-null.
+        Change::Update {
+            log: LogChange::default(),
+            expected: PreviousValue::MustExistAndMatch(Target::Object(update.old_id)),
+            new: Target::Object(update.new_id),
+        }
+    };
+
+    RefEdit {
+        change,
+        name,
+        deref: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1090,6 +1136,477 @@ mod tests {
                     );
                 }
             }
+
+            Ok(())
+        }
+    }
+
+    mod connectivity_properties {
+        use super::*;
+        use crate::receive_pack::Update;
+
+        /// Helper: create a bare repo with `git init --bare` and return the path.
+        fn git_init_bare(parent: &std::path::Path, name: &str) -> PathBuf {
+            let repo_path = parent.join(name);
+            let output = std::process::Command::new("git")
+                .args(["init", "--bare"])
+                .arg(&repo_path)
+                .output()
+                .expect("git should be available");
+            assert!(
+                output.status.success(),
+                "git init --bare should succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            repo_path
+        }
+
+        /// Helper: run a git command in the given repo, returning stdout as String.
+        fn git_in(repo: &std::path::Path, args: &[&str]) -> String {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .env("GIT_DIR", repo)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()
+                .expect("git command should execute");
+            assert!(
+                output.status.success(),
+                "git {:?} should succeed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("git output should be valid utf-8")
+                .trim()
+                .to_string()
+        }
+
+        /// Helper: write a blob and return its oid.
+        fn write_blob(repo: &std::path::Path, content: &[u8]) -> String {
+            let mut child = std::process::Command::new("git")
+                .args(["hash-object", "-w", "--stdin"])
+                .current_dir(repo)
+                .env("GIT_DIR", repo)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("git hash-object should spawn");
+            {
+                use std::io::Write;
+                child
+                    .stdin
+                    .take()
+                    .expect("stdin available")
+                    .write_all(content)
+                    .expect("write to stdin should succeed");
+            }
+            let output = child.wait_with_output().expect("git hash-object should complete");
+            assert!(
+                output.status.success(),
+                "git hash-object should succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("oid should be valid utf-8")
+                .trim()
+                .to_string()
+        }
+
+        /// Helper: create a pack from a list of OIDs (treated as revisions via --revs)
+        /// and return the pack bytes. This includes all objects reachable from the given revisions.
+        fn pack_objects(repo: &std::path::Path, revs: &[&str]) -> Vec<u8> {
+            let input = revs.join("\n") + "\n";
+            let mut child = std::process::Command::new("git")
+                .args(["pack-objects", "--stdout", "--revs"])
+                .current_dir(repo)
+                .env("GIT_DIR", repo)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("git pack-objects should spawn");
+            {
+                use std::io::Write;
+                child
+                    .stdin
+                    .take()
+                    .expect("stdin available")
+                    .write_all(input.as_bytes())
+                    .expect("write to pack-objects stdin should succeed");
+            }
+            let output = child.wait_with_output().expect("git pack-objects should complete");
+            assert!(
+                output.status.success(),
+                "git pack-objects --revs should succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.stdout
+        }
+
+        /// Helper: create a commit in a bare repo using low-level git commands.
+        /// Returns (commit_oid, tree_oid).
+        fn create_commit(
+            repo: &std::path::Path,
+            blob_content: &[u8],
+            filename: &str,
+            parent: Option<&str>,
+            message: &str,
+        ) -> (String, String) {
+            let blob_oid = write_blob(repo, blob_content);
+
+            // Create a tree with the blob
+            let tree_input = format!("100644 blob {}\t{}\n", blob_oid, filename);
+            let mut child = std::process::Command::new("git")
+                .args(["mktree"])
+                .current_dir(repo)
+                .env("GIT_DIR", repo)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("git mktree should spawn");
+            {
+                use std::io::Write;
+                child
+                    .stdin
+                    .take()
+                    .expect("stdin available")
+                    .write_all(tree_input.as_bytes())
+                    .expect("write to mktree stdin should succeed");
+            }
+            let output = child.wait_with_output().expect("git mktree should complete");
+            assert!(
+                output.status.success(),
+                "git mktree should succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let tree_oid = String::from_utf8(output.stdout)
+                .expect("tree oid should be valid utf-8")
+                .trim()
+                .to_string();
+
+            // Create the commit
+            let mut args = vec!["commit-tree", &tree_oid, "-m", message];
+            let parent_flag;
+            if let Some(p) = parent {
+                parent_flag = p.to_string();
+                args.push("-p");
+                args.push(&parent_flag);
+            }
+            let commit_oid = git_in(repo, &args);
+
+            (commit_oid, tree_oid)
+        }
+
+        // Feature: async-receive-pack-handler, Property 5: Connectivity check succeeds on complete object graphs
+        //
+        // Creates a bare repo with a commit (tree + blob), pushes a valid pack containing
+        // the commit, calls check_connectivity with an update pointing to the new commit,
+        // and asserts success.
+        #[test]
+        fn connectivity_check_succeeds_on_complete_object_graphs(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let tmp = tempfile::tempdir()?;
+
+            // Create a source bare repo with a commit
+            let source = git_init_bare(tmp.path(), "source.git");
+            let (commit_oid, _tree_oid) =
+                create_commit(&source, b"hello world\n", "file.txt", None, "initial commit");
+
+            // Create a pack containing the commit and all reachable objects
+            let pack_bytes = pack_objects(&source, &[&commit_oid]);
+
+            // Create a destination bare repo and ingest the pack
+            let dest = git_init_bare(tmp.path(), "dest.git");
+            let mut handler = ReceivePackHandler::open(dest.clone(), Options::default())?;
+            let mut cursor = std::io::Cursor::new(&pack_bytes);
+            handler
+                .ingest_pack(&mut cursor)
+                .expect("ingest_pack should succeed for a valid pack");
+
+            // Build an update pointing to the new commit
+            let new_id = gix_hash::ObjectId::from_hex(commit_oid.as_bytes())
+                .expect("commit oid should be valid hex");
+            let update = Update {
+                old_id: gix_hash::ObjectId::null(gix_hash::Kind::Sha1),
+                new_id,
+                ref_name: "refs/heads/main".into(),
+            };
+
+            let result = handler.check_connectivity(&[update]);
+            assert!(
+                result.is_ok(),
+                "connectivity check should succeed on a complete object graph, got: {:?}",
+                result.err()
+            );
+
+            let connectivity_result = result.expect("already asserted Ok");
+            assert!(
+                connectivity_result.new_objects.contains(&new_id),
+                "new_objects should contain the pushed commit"
+            );
+
+            Ok(())
+        }
+
+        // Feature: async-receive-pack-handler, Property 7: Deletion updates are excluded from connectivity checking
+        //
+        // Creates a bare repo, ingests a pack with some objects, then creates updates
+        // where some new_id is the null id (deletion). Asserts check_connectivity
+        // succeeds because deletions are skipped.
+        #[test]
+        fn deletion_updates_are_excluded_from_connectivity_checking(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let tmp = tempfile::tempdir()?;
+
+            // Create a source repo with a commit so we have a valid pack to ingest
+            let source = git_init_bare(tmp.path(), "source.git");
+            let (commit_oid, _tree_oid) =
+                create_commit(&source, b"content\n", "a.txt", None, "first");
+
+            let pack_bytes = pack_objects(&source, &[&commit_oid]);
+
+            // Ingest into a destination repo
+            let dest = git_init_bare(tmp.path(), "dest.git");
+            let mut handler = ReceivePackHandler::open(dest.clone(), Options::default())?;
+            let mut cursor = std::io::Cursor::new(&pack_bytes);
+            handler
+                .ingest_pack(&mut cursor)
+                .expect("ingest_pack should succeed");
+
+            // Build updates: one valid creation, and one deletion (new_id = null).
+            // The deletion should be skipped entirely — no object lookup for null ids.
+            let valid_id = gix_hash::ObjectId::from_hex(commit_oid.as_bytes())
+                .expect("commit oid should be valid hex");
+            let null_id = gix_hash::ObjectId::null(gix_hash::Kind::Sha1);
+
+            let updates = vec![
+                Update {
+                    old_id: null_id,
+                    new_id: valid_id,
+                    ref_name: "refs/heads/main".into(),
+                },
+                // Deletion: old_id is some non-null value, new_id is null
+                Update {
+                    old_id: valid_id,
+                    new_id: null_id,
+                    ref_name: "refs/heads/to-delete".into(),
+                },
+                // Another deletion with a completely fabricated old_id
+                Update {
+                    old_id: gix_hash::ObjectId::from_hex(
+                        b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    )
+                    .expect("hex should parse"),
+                    new_id: null_id,
+                    ref_name: "refs/heads/another-delete".into(),
+                },
+            ];
+
+            let result = handler.check_connectivity(&updates);
+            assert!(
+                result.is_ok(),
+                "connectivity check should succeed when deletion updates are present, got: {:?}",
+                result.err()
+            );
+
+            Ok(())
+        }
+
+        // Feature: async-receive-pack-handler, Property 8: Submodule tree entries do not trigger missing-object errors
+        //
+        // Creates a bare repo with a tree containing a gitlink entry (mode 160000)
+        // pointing to a commit OID that does NOT exist in the ODB. Asserts
+        // check_connectivity succeeds because submodule entries are skipped.
+        #[test]
+        fn submodule_tree_entries_do_not_trigger_missing_object_errors(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let tmp = tempfile::tempdir()?;
+
+            // Create a source bare repo
+            let source = git_init_bare(tmp.path(), "source.git");
+
+            // Create a blob for a regular file
+            let blob_oid = write_blob(&source, b"regular file content\n");
+
+            // Fabricate a submodule commit oid that does NOT exist anywhere
+            let fake_submodule_oid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+            // Create a tree with both a regular blob and a gitlink (submodule) entry.
+            // git mktree format: <mode> SP <type> SP <oid> TAB <name>
+            let tree_input = format!(
+                "100644 blob {}\tfile.txt\n160000 commit {}\tmy-submodule\n",
+                blob_oid, fake_submodule_oid
+            );
+            let mut child = std::process::Command::new("git")
+                .args(["mktree"])
+                .current_dir(&source)
+                .env("GIT_DIR", &source)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("git mktree should spawn");
+            {
+                use std::io::Write;
+                child
+                    .stdin
+                    .take()
+                    .expect("stdin available")
+                    .write_all(tree_input.as_bytes())
+                    .expect("write to mktree should succeed");
+            }
+            let output = child.wait_with_output().expect("git mktree should complete");
+            assert!(
+                output.status.success(),
+                "git mktree should succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let tree_oid = String::from_utf8(output.stdout)
+                .expect("tree oid should be valid utf-8")
+                .trim()
+                .to_string();
+
+            // Create a commit pointing to this tree
+            let commit_oid = git_in(&source, &["commit-tree", &tree_oid, "-m", "commit with submodule"]);
+
+            // Pack the commit + tree + blob (but NOT the fake submodule commit)
+            let pack_bytes = pack_objects(&source, &[&commit_oid]);
+
+            // Ingest into a destination repo
+            let dest = git_init_bare(tmp.path(), "dest.git");
+            let mut handler = ReceivePackHandler::open(dest.clone(), Options::default())?;
+            let mut cursor = std::io::Cursor::new(&pack_bytes);
+            handler
+                .ingest_pack(&mut cursor)
+                .expect("ingest_pack should succeed");
+
+            // Check connectivity — should succeed because the gitlink entry is skipped
+            let new_id = gix_hash::ObjectId::from_hex(commit_oid.as_bytes())
+                .expect("commit oid should be valid hex");
+            let update = Update {
+                old_id: gix_hash::ObjectId::null(gix_hash::Kind::Sha1),
+                new_id,
+                ref_name: "refs/heads/main".into(),
+            };
+
+            let result = handler.check_connectivity(&[update]);
+            assert!(
+                result.is_ok(),
+                "connectivity check should succeed even with submodule entries pointing to \
+                 non-existent commits, got: {:?}",
+                result.err()
+            );
+
+            Ok(())
+        }
+
+        // Feature: async-receive-pack-handler, Property 6: Connectivity walk terminates at pre-existing ref tips
+        //
+        // Creates a bare repo with a chain of commits (A → B → C) on refs/heads/main,
+        // then pushes a new commit D (parent = C) in a pack. Calls check_connectivity
+        // for D and asserts the walk only visits D and stops at C (which is a pre-existing tip).
+        // Verifies new_objects contains D but NOT A, B, or C.
+        #[test]
+        fn connectivity_walk_terminates_at_pre_existing_ref_tips(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let tmp = tempfile::tempdir()?;
+            let repo = git_init_bare(tmp.path(), "repo.git");
+
+            // Create a chain: A → B → C
+            let (commit_a, _) = create_commit(&repo, b"a\n", "a.txt", None, "commit A");
+            let (commit_b, _) = create_commit(&repo, b"b\n", "b.txt", Some(&commit_a), "commit B");
+            let (commit_c, _) = create_commit(&repo, b"c\n", "c.txt", Some(&commit_b), "commit C");
+
+            // Point refs/heads/main at C so it becomes a pre-existing tip
+            git_in(&repo, &["update-ref", "refs/heads/main", &commit_c]);
+
+            // Create commit D with parent C
+            let (commit_d, _) = create_commit(&repo, b"d\n", "d.txt", Some(&commit_c), "commit D");
+
+            // Create a pack containing ONLY commit D (and its tree/blob).
+            // Use --revs with C as exclusion to get only D's new objects.
+            let rev_input = format!("{}\n^{}\n", commit_d, commit_c);
+            let mut child = std::process::Command::new("git")
+                .args(["pack-objects", "--stdout", "--revs"])
+                .current_dir(&repo)
+                .env("GIT_DIR", &repo)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("git pack-objects --revs should spawn");
+            {
+                use std::io::Write;
+                child
+                    .stdin
+                    .take()
+                    .expect("stdin available")
+                    .write_all(rev_input.as_bytes())
+                    .expect("write revs to pack-objects should succeed");
+            }
+            let output = child.wait_with_output().expect("git pack-objects --revs should complete");
+            assert!(
+                output.status.success(),
+                "git pack-objects --revs should succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let pack_bytes = output.stdout;
+
+            // Now open a handler on the same repo (which already has A, B, C)
+            let mut handler = ReceivePackHandler::open(repo.clone(), Options::default())?;
+            let mut cursor = std::io::Cursor::new(&pack_bytes);
+            handler
+                .ingest_pack(&mut cursor)
+                .expect("ingest_pack should succeed for the incremental pack");
+
+            // Check connectivity for D
+            let d_id = gix_hash::ObjectId::from_hex(commit_d.as_bytes())
+                .expect("commit D oid should be valid hex");
+            let c_id = gix_hash::ObjectId::from_hex(commit_c.as_bytes())
+                .expect("commit C oid should be valid hex");
+            let b_id = gix_hash::ObjectId::from_hex(commit_b.as_bytes())
+                .expect("commit B oid should be valid hex");
+            let a_id = gix_hash::ObjectId::from_hex(commit_a.as_bytes())
+                .expect("commit A oid should be valid hex");
+
+            let update = Update {
+                old_id: c_id,
+                new_id: d_id,
+                ref_name: "refs/heads/main".into(),
+            };
+
+            let result = handler.check_connectivity(&[update]);
+            assert!(
+                result.is_ok(),
+                "connectivity check should succeed, got: {:?}",
+                result.err()
+            );
+
+            let connectivity_result = result.expect("already asserted Ok");
+
+            // D should be in new_objects
+            assert!(
+                connectivity_result.new_objects.contains(&d_id),
+                "new_objects should contain commit D"
+            );
+
+            // A, B, C should NOT be in new_objects (walk terminated at pre-existing tip C)
+            assert!(
+                !connectivity_result.new_objects.contains(&c_id),
+                "new_objects should NOT contain commit C (pre-existing tip)"
+            );
+            assert!(
+                !connectivity_result.new_objects.contains(&b_id),
+                "new_objects should NOT contain commit B (ancestor of pre-existing tip)"
+            );
+            assert!(
+                !connectivity_result.new_objects.contains(&a_id),
+                "new_objects should NOT contain commit A (ancestor of pre-existing tip)"
+            );
 
             Ok(())
         }
