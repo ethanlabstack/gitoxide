@@ -147,20 +147,20 @@ Implement a synchronous `ReceivePackHandler` in the `gix-protocol` crate's `rece
     - Assert `.keep` file no longer exists after successful `transact_refs`
     - **Validates: Requirements 3.7**
 
-- [ ] 7. Implement abort and lifecycle methods
+- [x] 7. Implement abort and lifecycle methods
   - [x] 7.1 Implement `ReceivePackHandler::abort_pack`
     - Remove `.keep` file if present
     - Transition state to `Aborted`
     - No-op if already in `Committed` or `Aborted` state (return Ok)
     - _Requirements: 4.4, 4.6_
 
-  - [~] 7.2 Write property test for abort_pack removing .keep file (Property 10)
+  - [x] 7.2 Write property test for abort_pack removing .keep file (Property 10)
     - **Property 10: abort_pack removes the .keep file**
     - Set up sessions with ingested packs
     - Assert `.keep` file no longer exists after `abort_pack`
     - **Validates: Requirements 4.4**
 
-  - [~] 7.3 Write unit tests for state machine enforcement
+  - [x] 7.3 Write unit tests for state machine enforcement
     - Test: `check_connectivity` before `ingest_pack` → `NotIngested`
     - Test: `transact_refs` before `ingest_pack` → `NotIngested`
     - Test: `abort_pack` after commit → Ok (no-op)
@@ -171,7 +171,7 @@ Implement a synchronous `ReceivePackHandler` in the `gix-protocol` crate's `rece
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 9. Implement Delegate trait
-  - [~] 9.1 Implement `Delegate` for `ReceivePackHandler`
+  - [x] 9.1 Implement `Delegate` for `ReceivePackHandler`
     - Implement `receive` method running full pipeline: ingest → connectivity check → transact
     - On pack ingestion failure: `UnpackStatus::Error`, all refs `Rejected`
     - On connectivity failure: `UnpackStatus::Error`, all refs `Rejected`

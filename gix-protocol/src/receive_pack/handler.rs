@@ -807,6 +807,101 @@ pub(crate) fn update_to_ref_edit(update: &super::Update) -> gix_ref::transaction
     }
 }
 
+// ---------------------------------------------------------------------------
+// Delegate trait implementation
+// ---------------------------------------------------------------------------
+
+impl super::Delegate for ReceivePackHandler {
+    /// Run the full receive-pack pipeline: ingest pack → connectivity check → ref transaction.
+    ///
+    /// Maps pipeline failures to appropriate [`Response`](super::Response) values:
+    /// - Pack ingestion failure → `UnpackStatus::Error`, all refs `Rejected`
+    /// - Connectivity failure → `UnpackStatus::Error`, all refs `Rejected`
+    /// - Ref transaction failure → `UnpackStatus::Error`, per-ref statuses from transaction if available
+    /// - Success → `UnpackStatus::Ok`, one `RefStatus::Ok` per updated ref
+    fn receive(
+        &mut self,
+        request: &super::Request,
+        pack_data: &mut dyn io::Read,
+    ) -> Result<super::Response, Box<dyn std::error::Error + Send + Sync + 'static>> {
+        // Step 1: Ingest pack data
+        if let Err(e) = self.ingest_pack(pack_data) {
+            let error_msg = e.to_string();
+            let ref_statuses = request
+                .updates
+                .iter()
+                .map(|update| super::RefStatus::Rejected {
+                    ref_name: update.ref_name.clone(),
+                    message: format!("unpack failed: {error_msg}").into(),
+                })
+                .collect();
+            return Ok(super::Response {
+                unpack_status: super::UnpackStatus::Error(error_msg.into()),
+                ref_statuses,
+                sideband_messages: Vec::new(),
+            });
+        }
+
+        // Step 2: Connectivity check
+        if let Err(e) = self.check_connectivity(&request.updates) {
+            let error_msg = e.to_string();
+            let ref_statuses = request
+                .updates
+                .iter()
+                .map(|update| super::RefStatus::Rejected {
+                    ref_name: update.ref_name.clone(),
+                    message: format!("connectivity check failed: {error_msg}").into(),
+                })
+                .collect();
+            return Ok(super::Response {
+                unpack_status: super::UnpackStatus::Error(error_msg.into()),
+                ref_statuses,
+                sideband_messages: Vec::new(),
+            });
+        }
+
+        // Step 3: Ref transaction
+        match self.transact_refs(&request.updates) {
+            Ok(transaction_result) => {
+                let ref_statuses = transaction_result
+                    .ref_results
+                    .into_iter()
+                    .map(|r| match r.status {
+                        RefUpdateStatus::Ok => super::RefStatus::Ok {
+                            ref_name: r.ref_name,
+                        },
+                        RefUpdateStatus::Rejected { reason } => super::RefStatus::Rejected {
+                            ref_name: r.ref_name,
+                            message: reason.into(),
+                        },
+                    })
+                    .collect();
+                Ok(super::Response {
+                    unpack_status: super::UnpackStatus::Ok,
+                    ref_statuses,
+                    sideband_messages: Vec::new(),
+                })
+            }
+            Err(e) => {
+                let error_msg = e.to_string();
+                let ref_statuses = request
+                    .updates
+                    .iter()
+                    .map(|update| super::RefStatus::Rejected {
+                        ref_name: update.ref_name.clone(),
+                        message: format!("ref transaction failed: {error_msg}").into(),
+                    })
+                    .collect();
+                Ok(super::Response {
+                    unpack_status: super::UnpackStatus::Error(error_msg.into()),
+                    ref_statuses,
+                    sideband_messages: Vec::new(),
+                })
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -2055,6 +2150,7 @@ mod tests {
         // Asserts the .keep file no longer exists after abort_pack.
         #[test]
         fn abort_pack_removes_keep_file() -> Result<(), Box<dyn std::error::Error>> {
+
             let tmp = tempfile::tempdir()?;
 
             // Create a source bare repo with a commit
@@ -2104,6 +2200,309 @@ mod tests {
                 handler.state,
                 crate::receive_pack::handler::SessionState::Aborted,
                 "handler state should be Aborted after abort_pack"
+            );
+
+            Ok(())
+        }
+    }
+
+    mod state_machine_tests {
+        use super::*;
+        use crate::receive_pack::Update;
+        use crate::receive_pack::handler::{ConnectivityError, TransactError, SessionState};
+
+        /// Helper: create a bare repo with `git init --bare` and return the path.
+        fn git_init_bare(parent: &std::path::Path, name: &str) -> PathBuf {
+            let repo_path = parent.join(name);
+            let output = std::process::Command::new("git")
+                .args(["init", "--bare"])
+                .arg(&repo_path)
+                .output()
+                .expect("git should be available");
+            assert!(
+                output.status.success(),
+                "git init --bare should succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            repo_path
+        }
+
+        /// Helper: write a blob and return its oid string.
+        fn write_blob(repo: &std::path::Path, content: &[u8]) -> String {
+            let mut child = std::process::Command::new("git")
+                .args(["hash-object", "-w", "--stdin"])
+                .current_dir(repo)
+                .env("GIT_DIR", repo)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("git hash-object should spawn");
+            {
+                use std::io::Write;
+                child
+                    .stdin
+                    .take()
+                    .expect("stdin available")
+                    .write_all(content)
+                    .expect("write to stdin should succeed");
+            }
+            let output = child.wait_with_output().expect("git hash-object should complete");
+            assert!(
+                output.status.success(),
+                "git hash-object should succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("oid should be valid utf-8")
+                .trim()
+                .to_string()
+        }
+
+        /// Helper: create a commit in a bare repo. Returns commit oid.
+        fn create_commit(
+            repo: &std::path::Path,
+            blob_content: &[u8],
+            filename: &str,
+            parent: Option<&str>,
+            message: &str,
+        ) -> String {
+            let blob_oid = write_blob(repo, blob_content);
+            let tree_input = format!("100644 blob {}\t{}\n", blob_oid, filename);
+            let mut child = std::process::Command::new("git")
+                .args(["mktree"])
+                .current_dir(repo)
+                .env("GIT_DIR", repo)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("git mktree should spawn");
+            {
+                use std::io::Write;
+                child
+                    .stdin
+                    .take()
+                    .expect("stdin available")
+                    .write_all(tree_input.as_bytes())
+                    .expect("write to mktree stdin should succeed");
+            }
+            let output = child.wait_with_output().expect("git mktree should complete");
+            assert!(
+                output.status.success(),
+                "git mktree should succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let tree_oid = String::from_utf8(output.stdout)
+                .expect("tree oid should be valid utf-8")
+                .trim()
+                .to_string();
+
+            let mut args = vec!["commit-tree".to_string(), tree_oid, "-m".to_string(), message.to_string()];
+            if let Some(p) = parent {
+                args.push("-p".to_string());
+                args.push(p.to_string());
+            }
+            let output = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(repo)
+                .env("GIT_DIR", repo)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()
+                .expect("git commit-tree should execute");
+            assert!(
+                output.status.success(),
+                "git commit-tree should succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("commit oid should be valid utf-8")
+                .trim()
+                .to_string()
+        }
+
+        /// Helper: create a pack from revisions and return the bytes.
+        fn pack_objects(repo: &std::path::Path, revs: &[&str]) -> Vec<u8> {
+            let input = revs.join("\n") + "\n";
+            let mut child = std::process::Command::new("git")
+                .args(["pack-objects", "--stdout", "--revs"])
+                .current_dir(repo)
+                .env("GIT_DIR", repo)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("git pack-objects should spawn");
+            {
+                use std::io::Write;
+                child
+                    .stdin
+                    .take()
+                    .expect("stdin available")
+                    .write_all(input.as_bytes())
+                    .expect("write to pack-objects stdin should succeed");
+            }
+            let output = child.wait_with_output().expect("git pack-objects should complete");
+            assert!(
+                output.status.success(),
+                "git pack-objects --revs should succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.stdout
+        }
+
+        #[test]
+        fn check_connectivity_before_ingest_returns_not_ingested() -> Result<(), Box<dyn std::error::Error>> {
+            let tmp = tempfile::tempdir()?;
+            create_bare_repo(tmp.path());
+
+            let handler = ReceivePackHandler::open(tmp.path().to_path_buf(), Options::default())?;
+
+            let null_id = gix_hash::ObjectId::null(gix_hash::Kind::Sha1);
+            let fake_id = gix_hash::ObjectId::from_hex(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .expect("hex should parse");
+            let updates = vec![Update {
+                old_id: null_id,
+                new_id: fake_id,
+                ref_name: "refs/heads/main".into(),
+            }];
+
+            let result = handler.check_connectivity(&updates);
+            match result {
+                Err(ConnectivityError::NotIngested) => {}
+                Err(other) => panic!(
+                    "expected ConnectivityError::NotIngested, got: {other}"
+                ),
+                Ok(_) => panic!(
+                    "expected ConnectivityError::NotIngested, but check_connectivity succeeded"
+                ),
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn transact_refs_before_ingest_returns_not_ingested() -> Result<(), Box<dyn std::error::Error>> {
+            let tmp = tempfile::tempdir()?;
+            create_bare_repo(tmp.path());
+
+            let mut handler = ReceivePackHandler::open(tmp.path().to_path_buf(), Options::default())?;
+
+            let null_id = gix_hash::ObjectId::null(gix_hash::Kind::Sha1);
+            let fake_id = gix_hash::ObjectId::from_hex(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .expect("hex should parse");
+            let updates = vec![Update {
+                old_id: null_id,
+                new_id: fake_id,
+                ref_name: "refs/heads/main".into(),
+            }];
+
+            let result = handler.transact_refs(&updates);
+            match result {
+                Err(TransactError::NotIngested) => {}
+                Err(other) => panic!(
+                    "expected TransactError::NotIngested, got: {other}"
+                ),
+                Ok(_) => panic!(
+                    "expected TransactError::NotIngested, but transact_refs succeeded"
+                ),
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn abort_pack_after_commit_is_noop() -> Result<(), Box<dyn std::error::Error>> {
+            let tmp = tempfile::tempdir()?;
+
+            // Create a source repo with a commit
+            let source = git_init_bare(tmp.path(), "source.git");
+            let commit_oid = create_commit(&source, b"content\n", "file.txt", None, "initial");
+
+            let pack_bytes = pack_objects(&source, &[&commit_oid]);
+
+            // Create destination and run the full pipeline
+            let dest = git_init_bare(tmp.path(), "dest.git");
+            let mut handler = ReceivePackHandler::open(dest.clone(), Options::default())?;
+            handler.ref_store.write_reflog = gix_ref::store::WriteReflog::Disable;
+
+            let mut cursor = std::io::Cursor::new(&pack_bytes);
+            handler
+                .ingest_pack(&mut cursor)
+                .expect("ingest_pack should succeed");
+
+            let new_id = gix_hash::ObjectId::from_hex(commit_oid.as_bytes())
+                .expect("commit oid should be valid hex");
+            let null_id = gix_hash::ObjectId::null(gix_hash::Kind::Sha1);
+            let updates = vec![Update {
+                old_id: null_id,
+                new_id,
+                ref_name: "refs/heads/main".into(),
+            }];
+
+            handler
+                .transact_refs(&updates)
+                .expect("transact_refs should succeed");
+
+            assert_eq!(
+                handler.state,
+                SessionState::Committed,
+                "handler should be in Committed state after transact_refs"
+            );
+
+            // abort_pack after commit should be a no-op returning Ok
+            handler
+                .abort_pack()
+                .expect("abort_pack after commit should return Ok (no-op)");
+
+            // State should remain Committed (abort_pack is a no-op in this state)
+            assert_eq!(
+                handler.state,
+                SessionState::Committed,
+                "handler state should remain Committed after abort_pack no-op"
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn double_abort_is_noop() -> Result<(), Box<dyn std::error::Error>> {
+            let tmp = tempfile::tempdir()?;
+
+            // Create a source repo with a commit
+            let source = git_init_bare(tmp.path(), "source.git");
+            let commit_oid = create_commit(&source, b"content\n", "file.txt", None, "initial");
+
+            let pack_bytes = pack_objects(&source, &[&commit_oid]);
+
+            // Create destination and ingest the pack
+            let dest = git_init_bare(tmp.path(), "dest.git");
+            let mut handler = ReceivePackHandler::open(dest.clone(), Options::default())?;
+
+            let mut cursor = std::io::Cursor::new(&pack_bytes);
+            handler
+                .ingest_pack(&mut cursor)
+                .expect("ingest_pack should succeed");
+
+            // First abort
+            handler
+                .abort_pack()
+                .expect("first abort_pack should return Ok");
+
+            assert_eq!(
+                handler.state,
+                SessionState::Aborted,
+                "handler should be in Aborted state after first abort"
+            );
+
+            // Second abort should also be Ok (no-op)
+            handler
+                .abort_pack()
+                .expect("second abort_pack should return Ok (no-op)");
+
+            assert_eq!(
+                handler.state,
+                SessionState::Aborted,
+                "handler state should remain Aborted after second abort"
             );
 
             Ok(())
