@@ -321,6 +321,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+<<<<<<< HEAD
 name = "bisync"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -334,8 +335,7 @@ name = "bisync_macros"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d21f40d350a700f6aa107e45fb26448cf489d34794b2ba4522181dc9f1173af6"
-
-[[package]]
+=======
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -349,6 +349,7 @@ name = "bit-vec"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
+>>>>>>> c84e9c0bb (feat: add upload-pack v2 server plumbing in gix-protocol)
 
 [[package]]
 name = "bitflags"
@@ -2346,11 +2347,9 @@ dependencies = [
  "gix-transport",
  "gix-traverse",
  "gix-utils",
- "gix-zlib",
  "nonempty",
  "proptest",
  "serde",
- "tempfile",
  "thiserror 2.0.18",
 ]
 
