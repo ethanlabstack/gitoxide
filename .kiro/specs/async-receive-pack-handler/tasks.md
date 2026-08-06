@@ -117,7 +117,7 @@ Implement a synchronous `ReceivePackHandler` in the `gix-protocol` crate's `rece
     - Assert walk stops at those ancestors and does not require objects below them
     - **Validates: Requirements 2.2**
 
-- [ ] 6. Implement atomic ref transaction (`transact_refs`)
+- [x] 6. Implement atomic ref transaction (`transact_refs`)
   - [x] 6.1 Implement Update-to-RefEdit mapping logic
     - Map `old_id ≠ zero, new_id ≠ zero` → `Change::Update` + `MustExistAndMatch(old_id)`
     - Map `old_id = zero, new_id ≠ zero` → `Change::Update` + `MustNotExist`
@@ -141,14 +141,14 @@ Implement a synchronous `ReceivePackHandler` in the `gix-protocol` crate's `rece
     - If `.keep` removal fails: return `TransactError::KeepFileRemoval`
     - _Requirements: 3.4, 3.5, 3.6, 3.7, 3.8_
 
-  - [~] 6.4 Write property test for successful transaction removing .keep file (Property 9)
+  - [x] 6.4 Write property test for successful transaction removing .keep file (Property 9)
     - **Property 9: Successful ref transaction removes the .keep file**
     - Set up sessions with ingested packs producing `.keep` files
     - Assert `.keep` file no longer exists after successful `transact_refs`
     - **Validates: Requirements 3.7**
 
 - [ ] 7. Implement abort and lifecycle methods
-  - [~] 7.1 Implement `ReceivePackHandler::abort_pack`
+  - [x] 7.1 Implement `ReceivePackHandler::abort_pack`
     - Remove `.keep` file if present
     - Transition state to `Aborted`
     - No-op if already in `Committed` or `Aborted` state (return Ok)

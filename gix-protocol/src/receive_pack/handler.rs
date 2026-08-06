@@ -677,6 +677,42 @@ impl ReceivePackHandler {
 }
 
 // ---------------------------------------------------------------------------
+// Pack abort
+// ---------------------------------------------------------------------------
+
+impl ReceivePackHandler {
+    /// Abort the current session: remove the `.keep` file so the pack becomes
+    /// eligible for garbage collection.
+    ///
+    /// This is a no-op if the session is already in [`SessionState::Committed`],
+    /// [`SessionState::Aborted`], or [`SessionState::Fresh`] (nothing to abort).
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error only if the `.keep` file exists but cannot be removed.
+    pub fn abort_pack(&mut self) -> Result<(), std::io::Error> {
+        match self.state {
+            SessionState::Fresh | SessionState::Committed | SessionState::Aborted => Ok(()),
+            SessionState::PackIngested => {
+                if let Some(keep_path) =
+                    self.ingest_outcome.as_ref().and_then(|o| o.keep_path.as_ref())
+                {
+                    match std::fs::remove_file(keep_path) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            // Already removed — that's fine.
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                self.state = SessionState::Aborted;
+                Ok(())
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Result types
 // ---------------------------------------------------------------------------
 
@@ -1790,6 +1826,287 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    mod transaction_properties {
+        use super::*;
+        use crate::receive_pack::Update;
+
+        /// Helper: create a bare repo with `git init --bare` and return the path.
+        fn git_init_bare(parent: &std::path::Path, name: &str) -> PathBuf {
+            let repo_path = parent.join(name);
+            let output = std::process::Command::new("git")
+                .args(["init", "--bare"])
+                .arg(&repo_path)
+                .output()
+                .expect("git should be available");
+            assert!(
+                output.status.success(),
+                "git init --bare should succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            repo_path
+        }
+
+        /// Helper: write a blob and return its oid string.
+        fn write_blob(repo: &std::path::Path, content: &[u8]) -> String {
+            let mut child = std::process::Command::new("git")
+                .args(["hash-object", "-w", "--stdin"])
+                .current_dir(repo)
+                .env("GIT_DIR", repo)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("git hash-object should spawn");
+            {
+                use std::io::Write;
+                child
+                    .stdin
+                    .take()
+                    .expect("stdin available")
+                    .write_all(content)
+                    .expect("write to stdin should succeed");
+            }
+            let output = child.wait_with_output().expect("git hash-object should complete");
+            assert!(
+                output.status.success(),
+                "git hash-object should succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("oid should be valid utf-8")
+                .trim()
+                .to_string()
+        }
+
+        /// Helper: create a commit in a bare repo using low-level git commands.
+        /// Returns the commit oid as a String.
+        fn create_commit(
+            repo: &std::path::Path,
+            blob_content: &[u8],
+            filename: &str,
+            parent: Option<&str>,
+            message: &str,
+        ) -> String {
+            let blob_oid = write_blob(repo, blob_content);
+
+            // Create a tree with the blob
+            let tree_input = format!("100644 blob {}\t{}\n", blob_oid, filename);
+            let mut child = std::process::Command::new("git")
+                .args(["mktree"])
+                .current_dir(repo)
+                .env("GIT_DIR", repo)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("git mktree should spawn");
+            {
+                use std::io::Write;
+                child
+                    .stdin
+                    .take()
+                    .expect("stdin available")
+                    .write_all(tree_input.as_bytes())
+                    .expect("write to mktree stdin should succeed");
+            }
+            let output = child.wait_with_output().expect("git mktree should complete");
+            assert!(
+                output.status.success(),
+                "git mktree should succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let tree_oid = String::from_utf8(output.stdout)
+                .expect("tree oid should be valid utf-8")
+                .trim()
+                .to_string();
+
+            // Create the commit
+            let mut args = vec!["commit-tree".to_string(), tree_oid, "-m".to_string(), message.to_string()];
+            if let Some(p) = parent {
+                args.push("-p".to_string());
+                args.push(p.to_string());
+            }
+            let output = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(repo)
+                .env("GIT_DIR", repo)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()
+                .expect("git commit-tree should execute");
+            assert!(
+                output.status.success(),
+                "git commit-tree should succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("commit oid should be valid utf-8")
+                .trim()
+                .to_string()
+        }
+
+        /// Helper: create a pack from a list of revisions and return the pack bytes.
+        fn pack_objects(repo: &std::path::Path, revs: &[&str]) -> Vec<u8> {
+            let input = revs.join("\n") + "\n";
+            let mut child = std::process::Command::new("git")
+                .args(["pack-objects", "--stdout", "--revs"])
+                .current_dir(repo)
+                .env("GIT_DIR", repo)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("git pack-objects should spawn");
+            {
+                use std::io::Write;
+                child
+                    .stdin
+                    .take()
+                    .expect("stdin available")
+                    .write_all(input.as_bytes())
+                    .expect("write to pack-objects stdin should succeed");
+            }
+            let output = child.wait_with_output().expect("git pack-objects should complete");
+            assert!(
+                output.status.success(),
+                "git pack-objects --revs should succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.stdout
+        }
+
+        // Feature: async-receive-pack-handler, Property 9: Successful ref transaction removes the .keep file
+        //
+        // Creates a bare repo, creates a commit, packs it, ingests the pack into a
+        // fresh bare repo (producing a .keep file), then calls transact_refs with a
+        // creation update. Asserts the .keep file no longer exists after transact_refs.
+        #[test]
+        fn successful_transaction_removes_keep_file() -> Result<(), Box<dyn std::error::Error>> {
+            let tmp = tempfile::tempdir()?;
+
+            // Create a source bare repo with a commit
+            let source = git_init_bare(tmp.path(), "source.git");
+            let commit_oid = create_commit(&source, b"content for prop9\n", "file.txt", None, "test commit");
+
+            // Create a pack containing the commit and all reachable objects
+            let pack_bytes = pack_objects(&source, &[&commit_oid]);
+
+            // Create a destination bare repo and ingest the pack
+            let dest = git_init_bare(tmp.path(), "dest.git");
+            let mut handler = ReceivePackHandler::open(dest.clone(), Options::default())?;
+
+            // Disable reflog writing so we don't need a committer for tests.
+            handler.ref_store.write_reflog = gix_ref::store::WriteReflog::Disable;
+
+            let mut cursor = std::io::Cursor::new(&pack_bytes);
+            handler
+                .ingest_pack(&mut cursor)
+                .expect("ingest_pack should succeed for a valid pack");
+
+            // Verify that the .keep file was created
+            let keep_path = handler
+                .ingest_outcome
+                .as_ref()
+                .expect("ingest_outcome should be set after successful ingestion")
+                .keep_path
+                .as_ref()
+                .expect("keep_path should be Some for a non-empty pack")
+                .clone();
+            assert!(
+                keep_path.exists(),
+                ".keep file should exist after pack ingestion at {:?}",
+                keep_path
+            );
+
+            // Now call transact_refs with a creation update
+            let new_id = gix_hash::ObjectId::from_hex(commit_oid.as_bytes())
+                .expect("commit oid should be valid hex");
+            let null_id = gix_hash::ObjectId::null(gix_hash::Kind::Sha1);
+            let update = Update {
+                old_id: null_id,
+                new_id,
+                ref_name: "refs/heads/main".into(),
+            };
+
+            let result = handler.transact_refs(&[update]);
+            assert!(
+                result.is_ok(),
+                "transact_refs should succeed for a valid creation update, got: {:?}",
+                result.err()
+            );
+
+            // Assert the .keep file no longer exists
+            assert!(
+                !keep_path.exists(),
+                ".keep file should be removed after successful transact_refs at {:?}",
+                keep_path
+            );
+
+            Ok(())
+        }
+
+        // Feature: async-receive-pack-handler, Property 10: abort_pack removes the .keep file
+        //
+        // Creates a bare repo, creates a commit, packs it, ingests the pack into a
+        // fresh bare repo (producing a .keep file), then calls abort_pack.
+        // Asserts the .keep file no longer exists after abort_pack.
+        #[test]
+        fn abort_pack_removes_keep_file() -> Result<(), Box<dyn std::error::Error>> {
+            let tmp = tempfile::tempdir()?;
+
+            // Create a source bare repo with a commit
+            let source = git_init_bare(tmp.path(), "source.git");
+            let commit_oid = create_commit(&source, b"content for prop10\n", "file.txt", None, "test commit");
+
+            // Create a pack containing the commit and all reachable objects
+            let pack_bytes = pack_objects(&source, &[&commit_oid]);
+
+            // Create a destination bare repo and ingest the pack
+            let dest = git_init_bare(tmp.path(), "dest.git");
+            let mut handler = ReceivePackHandler::open(dest.clone(), Options::default())?;
+            let mut cursor = std::io::Cursor::new(&pack_bytes);
+            handler
+                .ingest_pack(&mut cursor)
+                .expect("ingest_pack should succeed for a valid pack");
+
+            // Verify that the .keep file was created
+            let keep_path = handler
+                .ingest_outcome
+                .as_ref()
+                .expect("ingest_outcome should be set after successful ingestion")
+                .keep_path
+                .as_ref()
+                .expect("keep_path should be Some for a non-empty pack")
+                .clone();
+            assert!(
+                keep_path.exists(),
+                ".keep file should exist after pack ingestion at {:?}",
+                keep_path
+            );
+
+            // Call abort_pack
+            handler
+                .abort_pack()
+                .expect("abort_pack should succeed");
+
+            // Assert the .keep file no longer exists
+            assert!(
+                !keep_path.exists(),
+                ".keep file should be removed after abort_pack at {:?}",
+                keep_path
+            );
+
+            // Verify state transitioned to Aborted
+            assert_eq!(
+                handler.state,
+                crate::receive_pack::handler::SessionState::Aborted,
+                "handler state should be Aborted after abort_pack"
+            );
+
+            Ok(())
         }
     }
 }
