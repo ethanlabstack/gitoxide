@@ -100,6 +100,11 @@ name = "async-server"
 path = "tests/async-server.rs"
 required-features = ["async-server"]
 
+[[test]]
+name = "receive-pack-handler"
+path = "tests/receive-pack-handler.rs"
+required-features = ["blocking-server"]
+
 [[example]]
 name = "receive-pack-async-per-client"
 path = "examples/receive-pack-async-per-client.rs"
