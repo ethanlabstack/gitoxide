@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use gix_protocol::receive_pack::handler::{
     ConnectivityError, OpenError, Options, ReceivePackHandler, SessionState, TransactError,
 };
-use gix_protocol::receive_pack::Update;
+use gix_protocol::receive_pack::{SessionConfig, Update};
 
 // ---------------------------------------------------------------------------
 // Shared test helpers
@@ -307,7 +307,7 @@ mod pack_ingestion_properties {
             ).expect("handler should open successfully for a valid bare repo");
 
             let mut cursor = std::io::Cursor::new(&random_bytes);
-            let result = handler.ingest_pack(&mut cursor);
+            let result = handler.ingest_pack(&mut cursor, &SessionConfig::default());
 
             // Must return an error for random bytes
             prop_assert!(
@@ -436,7 +436,7 @@ mod pack_ingestion_properties {
 
         let mut cursor = std::io::Cursor::new(&pack_bytes);
         let outcome = handler
-            .ingest_pack(&mut cursor)
+            .ingest_pack(&mut cursor, &SessionConfig::default())
             .expect("ingest_pack should succeed for a valid pack");
 
         // Assert data_path, index_path, and keep_path are all Some
@@ -546,7 +546,7 @@ mod pack_ingestion_properties {
         )?;
 
         let mut cursor = std::io::Cursor::new(&thin_pack_bytes);
-        let outcome = handler.ingest_pack(&mut cursor);
+        let outcome = handler.ingest_pack(&mut cursor, &SessionConfig::default());
 
         match outcome {
             Ok(ingest_outcome) => {
@@ -592,7 +592,7 @@ mod connectivity_properties {
         let mut handler = ReceivePackHandler::open(dest.clone(), Options::default())?;
         let mut cursor = std::io::Cursor::new(&pack_bytes);
         handler
-            .ingest_pack(&mut cursor)
+            .ingest_pack(&mut cursor, &SessionConfig::default())
             .expect("ingest_pack should succeed for a valid pack");
 
         // Build an update pointing to the new commit
@@ -637,7 +637,7 @@ mod connectivity_properties {
         let mut handler = ReceivePackHandler::open(dest.clone(), Options::default())?;
         let mut cursor = std::io::Cursor::new(&pack_bytes);
         handler
-            .ingest_pack(&mut cursor)
+            .ingest_pack(&mut cursor, &SessionConfig::default())
             .expect("ingest_pack should succeed");
 
         // Build updates: one valid creation, and one deletion (new_id = null).
@@ -732,7 +732,7 @@ mod connectivity_properties {
         let mut handler = ReceivePackHandler::open(dest.clone(), Options::default())?;
         let mut cursor = std::io::Cursor::new(&pack_bytes);
         handler
-            .ingest_pack(&mut cursor)
+            .ingest_pack(&mut cursor, &SessionConfig::default())
             .expect("ingest_pack should succeed");
 
         // Check connectivity — should succeed because the gitlink entry is skipped
@@ -780,7 +780,7 @@ mod connectivity_properties {
         let mut handler = ReceivePackHandler::open(repo.clone(), Options::default())?;
         let mut cursor = std::io::Cursor::new(&pack_bytes);
         handler
-            .ingest_pack(&mut cursor)
+            .ingest_pack(&mut cursor, &SessionConfig::default())
             .expect("ingest_pack should succeed for the incremental pack");
 
         // Check connectivity for D
@@ -852,7 +852,7 @@ mod transaction_properties {
 
         let mut cursor = std::io::Cursor::new(&pack_bytes);
         handler
-            .ingest_pack(&mut cursor)
+            .ingest_pack(&mut cursor, &SessionConfig::default())
             .expect("ingest_pack should succeed for a valid pack");
 
         // Verify that the .keep file was created
@@ -876,7 +876,7 @@ mod transaction_properties {
             ref_name: "refs/heads/main".into(),
         };
 
-        let result = handler.transact_refs(&[update]);
+        let result = handler.transact_refs(&[update], &SessionConfig::default());
         assert!(
             result.is_ok(),
             "transact_refs should succeed for a valid creation update, got: {:?}",
@@ -907,7 +907,7 @@ mod transaction_properties {
         let mut handler = ReceivePackHandler::open(dest.clone(), Options::default())?;
         let mut cursor = std::io::Cursor::new(&pack_bytes);
         handler
-            .ingest_pack(&mut cursor)
+            .ingest_pack(&mut cursor, &SessionConfig::default())
             .expect("ingest_pack should succeed for a valid pack");
 
         // Verify that the .keep file was created
@@ -996,7 +996,7 @@ mod state_machine_tests {
             ref_name: "refs/heads/main".into(),
         }];
 
-        let result = handler.transact_refs(&updates);
+        let result = handler.transact_refs(&updates, &SessionConfig::default());
         match result {
             Err(TransactError::NotIngested) => {}
             Err(other) => panic!(
@@ -1024,7 +1024,7 @@ mod state_machine_tests {
 
         let mut cursor = std::io::Cursor::new(&pack_bytes);
         handler
-            .ingest_pack(&mut cursor)
+            .ingest_pack(&mut cursor, &SessionConfig::default())
             .expect("ingest_pack should succeed");
 
         let new_id = gix_hash::ObjectId::from_hex(commit_oid.as_bytes())
@@ -1037,7 +1037,7 @@ mod state_machine_tests {
         }];
 
         handler
-            .transact_refs(&updates)
+            .transact_refs(&updates, &SessionConfig::default())
             .expect("transact_refs should succeed");
 
         assert_eq!(
@@ -1074,7 +1074,7 @@ mod state_machine_tests {
 
         let mut cursor = std::io::Cursor::new(&pack_bytes);
         handler
-            .ingest_pack(&mut cursor)
+            .ingest_pack(&mut cursor, &SessionConfig::default())
             .expect("ingest_pack should succeed");
 
         // First abort
@@ -1296,7 +1296,7 @@ mod delegate_properties {
 
         let mut cursor = std::io::Cursor::new(pack_bytes.as_slice());
         handler
-            .ingest_pack(&mut cursor)
+            .ingest_pack(&mut cursor, &SessionConfig::default())
             .expect("ingest_pack should succeed for a valid pack");
 
         // Now look up each known object through the ODB
@@ -1378,7 +1378,7 @@ mod delegate_properties {
         let mut handler = ReceivePackHandler::open(repo.clone(), Options::default())?;
         let mut cursor = std::io::Cursor::new(pack_bytes.as_slice());
         handler
-            .ingest_pack(&mut cursor)
+            .ingest_pack(&mut cursor, &SessionConfig::default())
             .expect("ingest_pack should succeed for the incremental pack");
 
         let a_id = gix_hash::ObjectId::from_hex(commit_a.as_bytes())
@@ -1579,7 +1579,7 @@ mod integration_tests {
 
         let mut cursor = std::io::Cursor::new(&thin_pack_bytes);
         let ingest_outcome = handler
-            .ingest_pack(&mut cursor)
+            .ingest_pack(&mut cursor, &SessionConfig::default())
             .expect("ingest_pack should succeed for a thin pack with resolvable bases");
 
         assert!(
@@ -1618,7 +1618,7 @@ mod integration_tests {
         // Step 1: ingest_pack directly
         let mut cursor = std::io::Cursor::new(pack_bytes.as_slice());
         let ingest_outcome = handler
-            .ingest_pack(&mut cursor)
+            .ingest_pack(&mut cursor, &SessionConfig::default())
             .expect("ingest_pack should succeed for a valid pack");
 
         // Verify .keep file exists after ingestion
@@ -1648,7 +1648,7 @@ mod integration_tests {
         }];
 
         let transaction_result = handler
-            .transact_refs(&updates)
+            .transact_refs(&updates, &SessionConfig::default())
             .expect("transact_refs should succeed without prior check_connectivity");
 
         assert_eq!(
@@ -1703,7 +1703,7 @@ mod integration_tests {
 
         let mut cursor = std::io::Cursor::new(pack_bytes.as_slice());
         handler
-            .ingest_pack(&mut cursor)
+            .ingest_pack(&mut cursor, &SessionConfig::default())
             .expect("ingest_pack should succeed");
 
         // Attempt transact_refs with a WRONG old_id (CAS mismatch)
@@ -1720,20 +1720,33 @@ mod integration_tests {
             ref_name: "refs/heads/main".into(),
         }];
 
-        let result = handler.transact_refs(&updates);
+        let result = handler.transact_refs(&updates, &SessionConfig::default());
 
         match result {
-            Err(TransactError::Prepare(_)) => {
-                // Expected: CAS mismatch causes preparation failure
-            }
-            Err(other) => {
-                panic!(
-                    "expected TransactError::Prepare for CAS mismatch, got: {other}"
+            Ok(transaction_result) => {
+                // Per-ref mode: CAS mismatch causes the ref to be reported as Rejected
+                assert_eq!(
+                    transaction_result.ref_results.len(),
+                    1,
+                    "should have one ref result"
                 );
+                match &transaction_result.ref_results[0].status {
+                    gix_protocol::receive_pack::handler::RefUpdateStatus::Rejected { reason } => {
+                        assert!(
+                            reason.contains("lock/cas failed"),
+                            "rejection reason should indicate CAS failure, got: {reason}"
+                        );
+                    }
+                    other => {
+                        panic!(
+                            "expected Rejected status for CAS mismatch, got: {other:?}"
+                        );
+                    }
+                }
             }
-            Ok(_) => {
+            Err(e) => {
                 panic!(
-                    "expected TransactError::Prepare for CAS mismatch, but transact_refs succeeded"
+                    "expected Ok(TransactionResult) with Rejected status for CAS mismatch, got error: {e}"
                 );
             }
         }
@@ -1785,7 +1798,7 @@ mod integration_tests {
         let mut handler = ReceivePackHandler::open(repo.clone(), Options::default())?;
         let mut cursor = std::io::Cursor::new(pack_bytes.as_slice());
         handler
-            .ingest_pack(&mut cursor)
+            .ingest_pack(&mut cursor, &SessionConfig::default())
             .expect("ingest_pack should succeed for the incremental pack");
 
         let old_id = gix_hash::ObjectId::from_hex(tip_oid.as_bytes())
@@ -1843,5 +1856,953 @@ mod integration_tests {
         );
 
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Atomic all-or-nothing ref transaction properties
+// ---------------------------------------------------------------------------
+
+// Feature: receive-pack-v1-support, Property 4: Atomic mode — all-or-nothing ref transaction semantics
+mod atomic_transaction_properties {
+    use super::*;
+    use gix_protocol::receive_pack::handler::RefUpdateStatus;
+    use proptest::prelude::*;
+
+    // **Validates: Requirements 4.1, 4.2**
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(30))]
+
+        /// In atomic mode, when one ref has a CAS mismatch (wrong old_id),
+        /// ALL refs in the update set must be reported with the same status.
+        /// Since a CAS mismatch is injected, all must be Rejected.
+        #[test]
+        fn atomic_mode_all_rejected_on_any_cas_failure(
+            ref_count in 2usize..=6,
+            failing_index in 0usize..6,
+        ) {
+            // Clamp failing_index to actual ref_count
+            let failing_index = failing_index % ref_count;
+
+            let tmp = tempfile::tempdir()
+                .expect("should be able to create temp directory");
+            let source = git_init_bare(tmp.path(), "source.git");
+            let dest = git_init_bare(tmp.path(), "dest.git");
+
+            // Create ref_count commits in source, each pushed to dest on a distinct ref.
+            let mut commit_oids = Vec::with_capacity(ref_count);
+            let mut ref_names = Vec::with_capacity(ref_count);
+            for i in 0..ref_count {
+                let content = format!("atomic test content {}\n", i);
+                let filename = format!("file_{}.txt", i);
+                let message = format!("commit for ref {}", i);
+                let (commit_oid, _) = create_commit(
+                    &source,
+                    content.as_bytes(),
+                    &filename,
+                    None,
+                    &message,
+                );
+                let ref_name = format!("refs/heads/branch_{}", i);
+                ref_names.push(ref_name.clone());
+                commit_oids.push(commit_oid.clone());
+
+                // Point the ref in dest to this commit so we can later update it
+                // (first we need the objects in dest)
+            }
+
+            // Pack all source objects and ingest them into dest
+            let pack_bytes = pack_objects(&source, &commit_oids.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+
+            let mut handler = ReceivePackHandler::open(dest.clone(), Options::default())
+                .expect("handler should open for dest repo");
+            handler.disable_reflog();
+
+            let mut cursor = std::io::Cursor::new(&pack_bytes);
+            handler
+                .ingest_pack(&mut cursor, &SessionConfig::default())
+                .expect("ingest_pack should succeed");
+
+            // Set up refs in dest pointing to the commits (simulates existing state).
+            // We do this via git update-ref after the objects are in the ODB.
+            for (i, commit_oid) in commit_oids.iter().enumerate() {
+                git_in(&dest, &["update-ref", &ref_names[i], commit_oid]);
+            }
+
+            // Create new commits (updates) from a second batch in source
+            let mut new_commit_oids = Vec::with_capacity(ref_count);
+            for i in 0..ref_count {
+                let content = format!("updated atomic content {}\n", i);
+                let filename = format!("file_{}.txt", i);
+                let message = format!("update commit for ref {}", i);
+                let (new_commit_oid, _) = create_commit(
+                    &source,
+                    content.as_bytes(),
+                    &filename,
+                    Some(&commit_oids[i]),
+                    &message,
+                );
+                new_commit_oids.push(new_commit_oid);
+            }
+
+            // Pack the new objects and ingest into a fresh handler
+            let new_pack_bytes = pack_objects_with_exclusions(
+                &source,
+                &new_commit_oids.iter()
+                    .enumerate()
+                    .map(|(i, new_oid)| format!("{}\n^{}\n", new_oid, commit_oids[i]))
+                    .collect::<String>(),
+            );
+
+            let mut handler2 = ReceivePackHandler::open(dest.clone(), Options::default())
+                .expect("handler should open for dest repo (second time)");
+            handler2.disable_reflog();
+
+            let mut cursor2 = std::io::Cursor::new(&new_pack_bytes);
+            handler2
+                .ingest_pack(&mut cursor2, &SessionConfig::default())
+                .expect("second ingest_pack should succeed");
+
+            // Build updates: all have correct old_id EXCEPT the failing_index one
+            // which gets a wrong old_id (injected CAS failure).
+            let wrong_old_id = gix_hash::ObjectId::from_bytes_or_panic(&[0xAB; 20]);
+
+            let updates: Vec<Update> = (0..ref_count)
+                .map(|i| {
+                    let old_id = if i == failing_index {
+                        // Inject CAS mismatch: use a bogus old_id
+                        wrong_old_id
+                    } else {
+                        gix_hash::ObjectId::from_hex(commit_oids[i].as_bytes())
+                            .expect("commit oid should be valid hex")
+                    };
+                    let new_id = gix_hash::ObjectId::from_hex(new_commit_oids[i].as_bytes())
+                        .expect("new commit oid should be valid hex");
+                    Update {
+                        old_id,
+                        new_id,
+                        ref_name: ref_names[i].clone().into(),
+                    }
+                })
+                .collect();
+
+            // Execute in atomic mode
+            let atomic_config = SessionConfig { no_thin: false, atomic: true };
+            let result = handler2.transact_refs(&updates, &atomic_config);
+            let transaction_result = result.expect("transact_refs should not return a hard error");
+
+            // PROPERTY ASSERTION: In atomic mode with a CAS failure, ALL refs must be Rejected.
+            prop_assert_eq!(
+                transaction_result.ref_results.len(),
+                ref_count,
+                "should have one result per update"
+            );
+
+            let all_rejected = transaction_result.ref_results.iter().all(|r| {
+                matches!(r.status, RefUpdateStatus::Rejected { .. })
+            });
+            prop_assert!(
+                all_rejected,
+                "atomic mode with CAS failure on ref index {} should reject ALL refs, but got: {:?}",
+                failing_index,
+                transaction_result.ref_results
+            );
+        }
+
+        /// In atomic mode, when all refs have correct old_ids (no CAS failure),
+        /// ALL refs must be reported as Ok.
+        #[test]
+        fn atomic_mode_all_ok_when_no_failures(
+            ref_count in 2usize..=6,
+        ) {
+            let tmp = tempfile::tempdir()
+                .expect("should be able to create temp directory");
+            let source = git_init_bare(tmp.path(), "source.git");
+            let dest = git_init_bare(tmp.path(), "dest.git");
+
+            // Create ref_count commits in source
+            let mut commit_oids = Vec::with_capacity(ref_count);
+            let mut ref_names = Vec::with_capacity(ref_count);
+            for i in 0..ref_count {
+                let content = format!("atomic ok content {}\n", i);
+                let filename = format!("file_{}.txt", i);
+                let message = format!("commit for ok ref {}", i);
+                let (commit_oid, _) = create_commit(
+                    &source,
+                    content.as_bytes(),
+                    &filename,
+                    None,
+                    &message,
+                );
+                let ref_name = format!("refs/heads/ok_branch_{}", i);
+                ref_names.push(ref_name);
+                commit_oids.push(commit_oid);
+            }
+
+            // Pack and ingest into dest
+            let pack_bytes = pack_objects(&source, &commit_oids.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+
+            let mut handler = ReceivePackHandler::open(dest.clone(), Options::default())
+                .expect("handler should open");
+            handler.disable_reflog();
+
+            let mut cursor = std::io::Cursor::new(&pack_bytes);
+            handler
+                .ingest_pack(&mut cursor, &SessionConfig::default())
+                .expect("ingest_pack should succeed");
+
+            // Build creation updates (old_id = null → no CAS check needed for "must not exist")
+            let null_id = gix_hash::ObjectId::null(gix_hash::Kind::Sha1);
+            let updates: Vec<Update> = (0..ref_count)
+                .map(|i| {
+                    let new_id = gix_hash::ObjectId::from_hex(commit_oids[i].as_bytes())
+                        .expect("commit oid should be valid hex");
+                    Update {
+                        old_id: null_id,
+                        new_id,
+                        ref_name: ref_names[i].clone().into(),
+                    }
+                })
+                .collect();
+
+            // Execute in atomic mode
+            let atomic_config = SessionConfig { no_thin: false, atomic: true };
+            let result = handler.transact_refs(&updates, &atomic_config);
+            let transaction_result = result.expect("transact_refs should not return a hard error");
+
+            // PROPERTY ASSERTION: In atomic mode with no CAS failures, ALL refs must be Ok.
+            prop_assert_eq!(
+                transaction_result.ref_results.len(),
+                ref_count,
+                "should have one result per update"
+            );
+
+            let all_ok = transaction_result.ref_results.iter().all(|r| {
+                matches!(r.status, RefUpdateStatus::Ok)
+            });
+            prop_assert!(
+                all_ok,
+                "atomic mode with valid updates should report ALL refs as Ok, but got: {:?}",
+                transaction_result.ref_results
+            );
+        }
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Per-ref independent ref reporting properties
+// ---------------------------------------------------------------------------
+
+// Feature: receive-pack-v1-support, Property 5: Per-ref mode — independent ref reporting
+mod per_ref_independence_properties {
+    use super::*;
+    use gix_protocol::receive_pack::handler::RefUpdateStatus;
+    use proptest::prelude::*;
+
+    // **Validates: Requirements 4.3, 4.4, 4.5**
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(30))]
+
+        /// In per-ref mode, refs with correct old_id succeed (Ok) and refs with
+        /// wrong old_id are rejected independently. A CAS failure on one ref does
+        /// NOT cause other refs to be rejected.
+        #[test]
+        fn per_ref_mode_independent_reporting(
+            ref_count in 2usize..=6,
+            failure_seed in proptest::collection::vec(any::<bool>(), 2..=6),
+        ) {
+            // Adjust failure_seed to match ref_count and ensure at least one success + one failure
+            let mut failure_mask: Vec<bool> = failure_seed.into_iter().take(ref_count).collect();
+            // Pad if seed was shorter than ref_count
+            while failure_mask.len() < ref_count {
+                failure_mask.push(false);
+            }
+            // Ensure at least one failure
+            if !failure_mask.iter().any(|&b| b) {
+                failure_mask[0] = true;
+            }
+            // Ensure at least one success
+            if !failure_mask.iter().any(|&b| !b) {
+                let last = failure_mask.len() - 1;
+                failure_mask[last] = false;
+            }
+
+            let tmp = tempfile::tempdir()
+                .expect("should be able to create temp directory");
+            let source = git_init_bare(tmp.path(), "source.git");
+            let dest = git_init_bare(tmp.path(), "dest.git");
+
+            // Create ref_count independent commits in source.
+            let mut commit_oids = Vec::with_capacity(ref_count);
+            let mut ref_names = Vec::with_capacity(ref_count);
+            for i in 0..ref_count {
+                let content = format!("per-ref independence content {}\n", i);
+                let filename = format!("perref_{}.txt", i);
+                let message = format!("commit for per-ref test {}", i);
+                let (commit_oid, _) = create_commit(
+                    &source,
+                    content.as_bytes(),
+                    &filename,
+                    None,
+                    &message,
+                );
+                let ref_name = format!("refs/heads/perref_{}", i);
+                ref_names.push(ref_name);
+                commit_oids.push(commit_oid);
+            }
+
+            // Pack all source objects and ingest into dest.
+            let pack_bytes = pack_objects(
+                &source,
+                &commit_oids.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            );
+
+            let mut handler = ReceivePackHandler::open(dest.clone(), Options::default())
+                .expect("handler should open for dest repo");
+            handler.disable_reflog();
+
+            let mut cursor = std::io::Cursor::new(&pack_bytes);
+            handler
+                .ingest_pack(&mut cursor, &SessionConfig::default())
+                .expect("ingest_pack should succeed");
+
+            // Establish refs in dest pointing to those commits (simulates existing refs).
+            for (i, commit_oid) in commit_oids.iter().enumerate() {
+                git_in(&dest, &["update-ref", &ref_names[i], commit_oid]);
+            }
+
+            // Create new commits (one per ref) to serve as update targets.
+            let mut new_commit_oids = Vec::with_capacity(ref_count);
+            for i in 0..ref_count {
+                let content = format!("updated per-ref content {}\n", i);
+                let filename = format!("perref_{}.txt", i);
+                let message = format!("update commit for per-ref {}", i);
+                let (new_commit_oid, _) = create_commit(
+                    &source,
+                    content.as_bytes(),
+                    &filename,
+                    Some(&commit_oids[i]),
+                    &message,
+                );
+                new_commit_oids.push(new_commit_oid);
+            }
+
+            // Pack new objects and ingest into a fresh handler on dest.
+            let new_pack_bytes = pack_objects_with_exclusions(
+                &source,
+                &new_commit_oids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, new_oid)| format!("{}\n^{}\n", new_oid, commit_oids[i]))
+                    .collect::<String>(),
+            );
+
+            let mut handler2 = ReceivePackHandler::open(dest.clone(), Options::default())
+                .expect("handler should open for dest repo (second time)");
+            handler2.disable_reflog();
+
+            let mut cursor2 = std::io::Cursor::new(&new_pack_bytes);
+            handler2
+                .ingest_pack(&mut cursor2, &SessionConfig::default())
+                .expect("second ingest_pack should succeed");
+
+            // Build updates: refs where failure_mask[i] == true get a wrong old_id (CAS failure),
+            // while refs where failure_mask[i] == false get the correct old_id.
+            let wrong_old_id = gix_hash::ObjectId::from_bytes_or_panic(&[0xCD; 20]);
+
+            let updates: Vec<Update> = (0..ref_count)
+                .map(|i| {
+                    let old_id = if failure_mask[i] {
+                        // Inject CAS mismatch
+                        wrong_old_id
+                    } else {
+                        gix_hash::ObjectId::from_hex(commit_oids[i].as_bytes())
+                            .expect("commit oid should be valid hex")
+                    };
+                    let new_id = gix_hash::ObjectId::from_hex(new_commit_oids[i].as_bytes())
+                        .expect("new commit oid should be valid hex");
+                    Update {
+                        old_id,
+                        new_id,
+                        ref_name: ref_names[i].clone().into(),
+                    }
+                })
+                .collect();
+
+            // Execute in per-ref mode (atomic = false).
+            let per_ref_config = SessionConfig { no_thin: false, atomic: false };
+            let result = handler2.transact_refs(&updates, &per_ref_config);
+            let transaction_result = result
+                .expect("transact_refs in per-ref mode should not return a hard error");
+
+            // PROPERTY ASSERTION: Each ref is reported independently.
+            prop_assert_eq!(
+                transaction_result.ref_results.len(),
+                ref_count,
+                "should have one result per update"
+            );
+
+            for (i, ref_result) in transaction_result.ref_results.iter().enumerate() {
+                if failure_mask[i] {
+                    // This ref had a CAS mismatch → should be Rejected
+                    prop_assert!(
+                        matches!(ref_result.status, RefUpdateStatus::Rejected { .. }),
+                        "ref at index {} ({}) had injected CAS failure but was not Rejected: {:?}",
+                        i,
+                        ref_names[i],
+                        ref_result.status
+                    );
+                } else {
+                    // This ref had correct old_id → should be Ok
+                    prop_assert!(
+                        matches!(ref_result.status, RefUpdateStatus::Ok),
+                        "ref at index {} ({}) had correct old_id but was not Ok: {:?}",
+                        i,
+                        ref_names[i],
+                        ref_result.status
+                    );
+                }
+            }
+        }
+
+        /// In per-ref mode, when ALL refs have correct old_ids (no failures),
+        /// all refs should be reported as Ok.
+        #[test]
+        fn per_ref_mode_all_ok_when_no_failures(
+            ref_count in 2usize..=6,
+        ) {
+            let tmp = tempfile::tempdir()
+                .expect("should be able to create temp directory");
+            let source = git_init_bare(tmp.path(), "source.git");
+            let dest = git_init_bare(tmp.path(), "dest.git");
+
+            // Create ref_count commits in source
+            let mut commit_oids = Vec::with_capacity(ref_count);
+            let mut ref_names = Vec::with_capacity(ref_count);
+            for i in 0..ref_count {
+                let content = format!("per-ref all-ok content {}\n", i);
+                let filename = format!("allok_{}.txt", i);
+                let message = format!("commit for all-ok ref {}", i);
+                let (commit_oid, _) = create_commit(
+                    &source,
+                    content.as_bytes(),
+                    &filename,
+                    None,
+                    &message,
+                );
+                let ref_name = format!("refs/heads/allok_{}", i);
+                ref_names.push(ref_name);
+                commit_oids.push(commit_oid);
+            }
+
+            // Pack and ingest into dest
+            let pack_bytes = pack_objects(
+                &source,
+                &commit_oids.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            );
+
+            let mut handler = ReceivePackHandler::open(dest.clone(), Options::default())
+                .expect("handler should open");
+            handler.disable_reflog();
+
+            let mut cursor = std::io::Cursor::new(&pack_bytes);
+            handler
+                .ingest_pack(&mut cursor, &SessionConfig::default())
+                .expect("ingest_pack should succeed");
+
+            // Build creation updates (old_id = null → refs must not exist yet)
+            let null_id = gix_hash::ObjectId::null(gix_hash::Kind::Sha1);
+            let updates: Vec<Update> = (0..ref_count)
+                .map(|i| {
+                    let new_id = gix_hash::ObjectId::from_hex(commit_oids[i].as_bytes())
+                        .expect("commit oid should be valid hex");
+                    Update {
+                        old_id: null_id,
+                        new_id,
+                        ref_name: ref_names[i].clone().into(),
+                    }
+                })
+                .collect();
+
+            // Execute in per-ref mode (atomic = false, the default)
+            let per_ref_config = SessionConfig { no_thin: false, atomic: false };
+            let result = handler.transact_refs(&updates, &per_ref_config);
+            let transaction_result = result
+                .expect("transact_refs in per-ref mode should not return a hard error");
+
+            // PROPERTY ASSERTION: All refs succeed independently.
+            prop_assert_eq!(
+                transaction_result.ref_results.len(),
+                ref_count,
+                "should have one result per update"
+            );
+
+            let all_ok = transaction_result.ref_results.iter().all(|r| {
+                matches!(r.status, RefUpdateStatus::Ok)
+            });
+            prop_assert!(
+                all_ok,
+                "per-ref mode with all valid updates should report ALL refs as Ok, but got: {:?}",
+                transaction_result.ref_results
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// No-thin enforcement properties
+// ---------------------------------------------------------------------------
+
+// Feature: receive-pack-v1-support, Property 6: No-thin enforcement rejects thin packs
+mod no_thin_enforcement_properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Generate a thin pack using `git pack-objects --stdout --thin --revs`.
+    ///
+    /// Creates a parent commit (base) and a child commit whose tree shares
+    /// similar content, then packs the child with the parent excluded. This
+    /// forces git to emit REF_DELTA entries whose bases exist only in the ODB
+    /// (not in the pack).
+    ///
+    /// Returns (thin_pack_bytes, child_commit_oid) or None if git didn't produce output.
+    fn create_thin_pack_via_commits(
+        repo: &std::path::Path,
+        base_content: &[u8],
+        child_content: &[u8],
+    ) -> Option<(Vec<u8>, String)> {
+        // Create parent commit with a file
+        let (parent_oid, _) = create_commit(repo, base_content, "shared.txt", None, "base commit");
+
+        // Create child commit with similar file content (same filename to maximize deltification)
+        let (child_oid, _) = create_commit(
+            repo,
+            child_content,
+            "shared.txt",
+            Some(&parent_oid),
+            "child commit",
+        );
+
+        // Pack the child with parent excluded and --thin enabled.
+        // This tells git "the receiver has parent, so delta against its objects".
+        let rev_input = format!("{}\n^{}\n", child_oid, parent_oid);
+        let mut child_proc = std::process::Command::new("git")
+            .args(["pack-objects", "--stdout", "--thin", "--revs"])
+            .current_dir(repo)
+            .env("GIT_DIR", repo)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("git pack-objects --thin --revs should spawn");
+        {
+            use std::io::Write;
+            child_proc
+                .stdin
+                .take()
+                .expect("stdin available")
+                .write_all(rev_input.as_bytes())
+                .expect("write revs to pack-objects stdin should succeed");
+        }
+        let output = child_proc
+            .wait_with_output()
+            .expect("git pack-objects --thin --revs should complete");
+        if !output.status.success() || output.stdout.is_empty() {
+            return None;
+        }
+        Some((output.stdout, child_oid))
+    }
+
+    /// Check if a pack file actually contains REF_DELTA entries by verifying
+    /// it fails to be ingested without ODB lookup (indicating it's truly thin).
+    fn is_truly_thin_pack(_repo: &std::path::Path, pack_bytes: &[u8]) -> bool {
+        // Create a separate empty repo where the base objects don't exist.
+        // If the pack ingests fine there, it's NOT truly thin.
+        let empty_tmp = tempfile::tempdir()
+            .expect("should be able to create temp dir for thin check");
+        let empty_repo = git_init_bare(empty_tmp.path(), "empty-check.git");
+
+        let mut handler = ReceivePackHandler::open(empty_repo, Options::default())
+            .expect("handler should open for empty repo");
+
+        let no_thin_config = SessionConfig { no_thin: true, atomic: false };
+        let mut cursor = std::io::Cursor::new(pack_bytes);
+        let result = handler.ingest_pack(&mut cursor, &no_thin_config);
+        // If it fails in an empty repo with no ODB lookup, it IS truly thin.
+        // (Note: we also skip the ODB lookup by using no_thin: true, but since
+        // the empty repo has no objects anyway, it doesn't matter.)
+        result.is_err()
+    }
+
+    // **Validates: Requirements 5.1, 5.2, 5.3**
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(20))]
+
+        /// With `no_thin: true`, a thin pack whose ref-delta bases are NOT included
+        /// in the pack itself must be rejected. With `no_thin: false` on the same
+        /// repo (where bases exist in the ODB), the same thin pack must succeed.
+        #[test]
+        fn no_thin_rejects_thin_packs_and_without_no_thin_succeeds(
+            // Use base content large enough that git will delta-compress the child.
+            // Git needs at least ~50-60 bytes of shared content for delta heuristics
+            // to kick in. We use 128+ bytes to be safe.
+            base_size in 128usize..512,
+            suffix_size in 4usize..32,
+        ) {
+            // Generate deterministic base content (repeating pattern)
+            let base_content: Vec<u8> = (0..base_size)
+                .map(|i| b'A' + (i % 26) as u8)
+                .collect();
+            // Child content = base + extra suffix (very similar → forces delta encoding)
+            let mut child_content = base_content.clone();
+            let extra: Vec<u8> = (0..suffix_size)
+                .map(|i| b'z' - (i % 26) as u8)
+                .collect();
+            child_content.extend_from_slice(&extra);
+
+            let tmp = tempfile::tempdir()
+                .expect("should be able to create temp directory");
+            let repo = git_init_bare(tmp.path(), "thin-test.git");
+
+            let (thin_pack_bytes, _child_oid) = match create_thin_pack_via_commits(
+                &repo,
+                &base_content,
+                &child_content,
+            ) {
+                Some(result) => result,
+                None => {
+                    // git didn't produce a thin pack for this content — skip
+                    return Ok(());
+                }
+            };
+
+            // Verify this is actually a thin pack (contains REF_DELTA entries
+            // referencing objects not in the pack). If it's NOT thin, skip.
+            if !is_truly_thin_pack(&repo, &thin_pack_bytes) {
+                // git decided not to produce ref-deltas for this content.
+                // This can happen if the objects are too small or dissimilar.
+                return Ok(());
+            }
+
+            // --- Test 1: no_thin = true → should reject the thin pack ---
+            // The repo HAS the base objects, but no_thin disables ODB lookup,
+            // so the ref-delta entries cannot be resolved.
+            {
+                let mut handler = ReceivePackHandler::open(repo.clone(), Options::default())
+                    .expect("handler should open for thin-test repo");
+
+                let no_thin_config = SessionConfig { no_thin: true, atomic: false };
+                let mut cursor = std::io::Cursor::new(&thin_pack_bytes);
+                let result = handler.ingest_pack(&mut cursor, &no_thin_config);
+
+                prop_assert!(
+                    result.is_err(),
+                    "ingest_pack with no_thin=true should reject a thin pack with \
+                     unresolvable ref-delta bases, but got Ok: {:?}",
+                    result
+                );
+            }
+
+            // --- Test 2: no_thin = false → should succeed (bases in ODB) ---
+            {
+                let mut handler = ReceivePackHandler::open(repo.clone(), Options::default())
+                    .expect("handler should open for thin-test repo (second time)");
+
+                let allow_thin_config = SessionConfig { no_thin: false, atomic: false };
+                let mut cursor = std::io::Cursor::new(&thin_pack_bytes);
+                let result = handler.ingest_pack(&mut cursor, &allow_thin_config);
+
+                prop_assert!(
+                    result.is_ok(),
+                    "ingest_pack with no_thin=false should succeed for a thin pack \
+                     whose bases exist in the ODB, but got error: {:?}",
+                    result
+                );
+
+                let outcome = result.expect("already asserted Ok");
+                prop_assert!(
+                    outcome.object_count >= 1,
+                    "ingested thin pack should have at least 1 object, got {}",
+                    outcome.object_count
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Delete-only push detection properties
+// ---------------------------------------------------------------------------
+
+mod delete_only_detection_properties {
+    use super::*;
+    use gix_protocol::receive_pack::{Capability, Delegate, RefStatus, Request, UnpackStatus};
+    use proptest::prelude::*;
+
+    // Feature: receive-pack-v1-support, Property 8: Delete-only pushes skip pack ingestion and connectivity
+    // **Validates: Requirements 7.1, 7.2, 7.3**
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        /// When ALL updates in a push request have new_id == zero (all deletions),
+        /// the handler skips pack ingestion and connectivity checking, and
+        /// successfully processes the deletion ref edits.
+        #[test]
+        fn delete_only_push_skips_pack_and_connectivity(
+            ref_count in 1usize..=5,
+        ) {
+            let tmp = tempfile::tempdir()
+                .expect("should be able to create temp directory");
+            let repo = git_init_bare(tmp.path(), "repo.git");
+
+            // Create ref_count commits and point refs at them (simulates existing state).
+            let mut commit_oids = Vec::with_capacity(ref_count);
+            let mut ref_names = Vec::with_capacity(ref_count);
+            for i in 0..ref_count {
+                let content = format!("delete-only content {}\n", i);
+                let filename = format!("del_{}.txt", i);
+                let message = format!("commit for deletion ref {}", i);
+                let (commit_oid, _) = create_commit(
+                    &repo,
+                    content.as_bytes(),
+                    &filename,
+                    None,
+                    &message,
+                );
+                let ref_name = format!("refs/heads/del_branch_{}", i);
+                git_in(&repo, &["update-ref", &ref_name, &commit_oid]);
+                ref_names.push(ref_name);
+                commit_oids.push(commit_oid);
+            }
+
+            // Build a delete-only request: all updates have new_id = null (zero id).
+            let null_id = gix_hash::ObjectId::null(gix_hash::Kind::Sha1);
+            let updates: Vec<Update> = (0..ref_count)
+                .map(|i| {
+                    let old_id = gix_hash::ObjectId::from_hex(commit_oids[i].as_bytes())
+                        .expect("commit oid should be valid hex");
+                    Update {
+                        old_id,
+                        new_id: null_id,
+                        ref_name: ref_names[i].clone().into(),
+                    }
+                })
+                .collect();
+
+            let request = Request {
+                capabilities: vec![Capability {
+                    name: "report-status".into(),
+                    value: None,
+                }],
+                updates,
+                push_options: Vec::new(),
+            };
+
+            let mut handler = ReceivePackHandler::open(repo.clone(), Options::default())
+                .expect("handler should open for repo");
+            handler.disable_reflog();
+
+            // Provide EMPTY pack data — delete-only should NOT attempt to read any.
+            let empty_data: &[u8] = &[];
+            let mut cursor = std::io::Cursor::new(empty_data);
+
+            let response = handler
+                .receive(&request, &mut cursor)
+                .expect("Delegate::receive should succeed for delete-only push");
+
+            // PROPERTY ASSERTION 1: Unpack status is Ok (no pack was needed).
+            prop_assert_eq!(
+                response.unpack_status,
+                UnpackStatus::Ok,
+                "delete-only push should yield UnpackStatus::Ok since no pack is consumed"
+            );
+
+            // PROPERTY ASSERTION 2: Per-ref statuses present for each deletion.
+            prop_assert_eq!(
+                response.ref_statuses.len(),
+                ref_count,
+                "should have exactly one ref status per deletion update"
+            );
+
+            // PROPERTY ASSERTION 3: All refs should be Ok (deletions processed).
+            for (i, status) in response.ref_statuses.iter().enumerate() {
+                match status {
+                    RefStatus::Ok { ref_name } => {
+                        prop_assert_eq!(
+                            ref_name.as_ref() as &[u8],
+                            ref_names[i].as_bytes(),
+                            "ref status name should match the update at index {}",
+                            i
+                        );
+                    }
+                    RefStatus::Rejected { ref_name, message } => {
+                        prop_assert!(
+                            false,
+                            "expected RefStatus::Ok for deletion of {}, got Rejected: {}",
+                            ref_name,
+                            message
+                        );
+                    }
+                }
+            }
+
+            // PROPERTY ASSERTION 4: Verify refs are actually deleted in the repo.
+            for ref_name in &ref_names {
+                let show_ref_output = std::process::Command::new("git")
+                    .args(["show-ref", "--verify", ref_name])
+                    .current_dir(&repo)
+                    .env("GIT_DIR", &repo)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .output()
+                    .expect("git show-ref should execute");
+                prop_assert!(
+                    !show_ref_output.status.success(),
+                    "ref {} should no longer exist after delete-only push",
+                    ref_name
+                );
+            }
+        }
+
+        /// When a push mixes deletions with creations/updates, the handler
+        /// follows normal flow — it requires pack data for the non-deletion
+        /// updates and would fail if no valid pack data is provided.
+        #[test]
+        fn mixed_push_requires_normal_flow(
+            deletion_count in 1usize..=3,
+            creation_count in 1usize..=3,
+        ) {
+            let tmp = tempfile::tempdir()
+                .expect("should be able to create temp directory");
+            let repo = git_init_bare(tmp.path(), "repo.git");
+
+            // Create commits for existing refs that will be deleted.
+            let mut deletion_oids = Vec::with_capacity(deletion_count);
+            let mut deletion_refs = Vec::with_capacity(deletion_count);
+            for i in 0..deletion_count {
+                let content = format!("mixed delete content {}\n", i);
+                let filename = format!("mixed_del_{}.txt", i);
+                let message = format!("commit for mixed deletion {}", i);
+                let (commit_oid, _) = create_commit(
+                    &repo,
+                    content.as_bytes(),
+                    &filename,
+                    None,
+                    &message,
+                );
+                let ref_name = format!("refs/heads/mixed_del_{}", i);
+                git_in(&repo, &["update-ref", &ref_name, &commit_oid]);
+                deletion_refs.push(ref_name);
+                deletion_oids.push(commit_oid);
+            }
+
+            // Create commits that will be "pushed" as creations.
+            let mut creation_oids = Vec::with_capacity(creation_count);
+            let mut creation_refs = Vec::with_capacity(creation_count);
+            for i in 0..creation_count {
+                let content = format!("mixed create content {}\n", i);
+                let filename = format!("mixed_create_{}.txt", i);
+                let message = format!("commit for mixed creation {}", i);
+                let (commit_oid, _) = create_commit(
+                    &repo,
+                    content.as_bytes(),
+                    &filename,
+                    None,
+                    &message,
+                );
+                let ref_name = format!("refs/heads/mixed_create_{}", i);
+                creation_refs.push(ref_name);
+                creation_oids.push(commit_oid);
+            }
+
+            // Build a mixed request: some deletions + some creations.
+            let null_id = gix_hash::ObjectId::null(gix_hash::Kind::Sha1);
+            let mut updates = Vec::with_capacity(deletion_count + creation_count);
+
+            // Deletion updates
+            for i in 0..deletion_count {
+                let old_id = gix_hash::ObjectId::from_hex(deletion_oids[i].as_bytes())
+                    .expect("deletion oid should be valid hex");
+                updates.push(Update {
+                    old_id,
+                    new_id: null_id,
+                    ref_name: deletion_refs[i].clone().into(),
+                });
+            }
+
+            // Creation updates (non-deletion: new_id is not null)
+            for i in 0..creation_count {
+                let new_id = gix_hash::ObjectId::from_hex(creation_oids[i].as_bytes())
+                    .expect("creation oid should be valid hex");
+                updates.push(Update {
+                    old_id: null_id,
+                    new_id,
+                    ref_name: creation_refs[i].clone().into(),
+                });
+            }
+
+            let request = Request {
+                capabilities: vec![Capability {
+                    name: "report-status".into(),
+                    value: None,
+                }],
+                updates,
+                push_options: Vec::new(),
+            };
+
+            // Provide INVALID pack data — mixed pushes attempt to ingest pack data.
+            // Because there's at least one non-deletion update, the handler should
+            // try to read pack data and fail (proving it doesn't skip ingestion).
+            let invalid_data = b"not-a-valid-pack";
+            let mut cursor = std::io::Cursor::new(invalid_data.as_slice());
+
+            let mut handler = ReceivePackHandler::open(repo.clone(), Options::default())
+                .expect("handler should open for repo");
+            handler.disable_reflog();
+
+            let response = handler
+                .receive(&request, &mut cursor)
+                .expect("Delegate::receive should return Ok(Response) even on pack failure");
+
+            // PROPERTY ASSERTION: Mixed push attempts pack ingestion and fails with
+            // UnpackStatus::Error (proving it did NOT skip the pack ingestion step).
+            match &response.unpack_status {
+                UnpackStatus::Error(msg) => {
+                    prop_assert!(
+                        !msg.is_empty(),
+                        "mixed push with invalid pack data should produce an error message"
+                    );
+                }
+                UnpackStatus::Ok => {
+                    prop_assert!(
+                        false,
+                        "mixed push with invalid pack data should NOT succeed — \
+                         it should attempt pack ingestion and fail, proving normal flow is used"
+                    );
+                }
+            }
+
+            // All refs should be rejected because the pack ingestion failed.
+            prop_assert_eq!(
+                response.ref_statuses.len(),
+                deletion_count + creation_count,
+                "should have one ref status per update even on failure"
+            );
+
+            for status in &response.ref_statuses {
+                match status {
+                    RefStatus::Rejected { .. } => { /* expected */ }
+                    RefStatus::Ok { ref_name } => {
+                        prop_assert!(
+                            false,
+                            "expected all refs to be Rejected after pack ingestion failure, \
+                             but {} was Ok",
+                            ref_name
+                        );
+                    }
+                }
+            }
+        }
     }
 }

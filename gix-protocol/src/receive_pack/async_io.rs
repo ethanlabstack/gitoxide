@@ -9,7 +9,12 @@ use futures_lite::AsyncWriteExt as _;
 /// Serve one protocol V1 receive-pack request over async transport streams.
 ///
 /// This adapts async readers/writers to the existing blocking receive-pack plumbing.
-pub async fn serve_v1<R, W, D>(input: &mut R, output: &mut W, delegate: &mut D) -> Result<super::Outcome, super::Error>
+pub async fn serve_v1<R, W, D>(
+    input: &mut R,
+    output: &mut W,
+    delegate: &mut D,
+    config: &super::ServerConfig,
+) -> Result<super::Outcome, super::Error>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -18,7 +23,7 @@ where
     let outcome = {
         let mut blocking_input = futures_lite::io::BlockOn::new(input);
         let mut blocking_output = futures_lite::io::BlockOn::new(&mut *output);
-        super::serve_v1(&mut blocking_input, &mut blocking_output, delegate)?
+        super::serve_v1(&mut blocking_input, &mut blocking_output, delegate, config)?
     };
     output.flush().await?;
     Ok(outcome)
@@ -110,7 +115,7 @@ mod tests {
             ..Default::default()
         };
 
-        let outcome = serve_v1(&mut input, &mut output, &mut delegate).await?;
+        let outcome = serve_v1(&mut input, &mut output, &mut delegate, &super::super::ServerConfig::default()).await?;
         assert_eq!(outcome.updates_received, 1);
         assert_eq!(outcome.push_options_received, 0);
         assert_eq!(outcome.ref_statuses_sent, 1);
@@ -305,7 +310,7 @@ mod tests {
             let Some((mut input, mut output)) = next_connection().await? else {
                 break;
             };
-            let outcome = serve_v1(&mut input, &mut output, delegate).await?;
+            let outcome = serve_v1(&mut input, &mut output, delegate, &super::super::ServerConfig::default()).await?;
             aggregated.sessions_served += 1;
             aggregated.updates_received += outcome.updates_received;
             aggregated.push_options_received += outcome.push_options_received;

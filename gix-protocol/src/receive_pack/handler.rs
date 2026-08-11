@@ -71,8 +71,6 @@ pub struct ReceivePackHandler {
     pub(crate) odb: Arc<gix_odb::Store>,
     /// Reference store (file-based).
     pub(crate) ref_store: gix_ref::file::Store,
-    /// Repository root path (bare repo).
-    pub(crate) repo_path: PathBuf,
     /// Object directory path.
     pub(crate) objects_dir: PathBuf,
     /// Handler configuration.
@@ -282,7 +280,6 @@ impl ReceivePackHandler {
         Ok(ReceivePackHandler {
             odb: Arc::new(odb),
             ref_store,
-            repo_path,
             objects_dir,
             options,
             state: SessionState::Fresh,
@@ -298,16 +295,25 @@ impl ReceivePackHandler {
 impl ReceivePackHandler {
     /// Ingest pack data from the given byte reader.
     ///
-    /// Writes the pack and its index to the repository object directory, resolving
-    /// thin-pack ref-delta objects via the ODB. On success, transitions the session
-    /// state to [`SessionState::PackIngested`] and returns an [`IngestOutcome`].
+    /// Writes the pack and its index to the repository object directory. When
+    /// `session_config.no_thin` is `false` (default), thin-pack ref-delta objects
+    /// are resolved via the ODB. When `no_thin` is `true`, the ODB lookup is
+    /// disabled so that any ref-delta whose base is not in the pack itself will
+    /// cause an error — enforcing the `no-thin` capability.
+    ///
+    /// On success, transitions the session state to [`SessionState::PackIngested`]
+    /// and returns an [`IngestOutcome`].
     ///
     /// # Errors
     ///
     /// Returns [`IngestError::InvalidState`] if the handler is not in the `Fresh` state.
     /// Returns [`IngestError::MalformedPack`] if the pack data is invalid.
     /// Returns [`IngestError::CreatePackDir`] if the pack directory cannot be created.
-    pub fn ingest_pack(&mut self, pack_data: &mut dyn io::Read) -> Result<IngestOutcome, IngestError> {
+    pub fn ingest_pack(
+        &mut self,
+        pack_data: &mut dyn io::Read,
+        session_config: &super::SessionConfig,
+    ) -> Result<IngestOutcome, IngestError> {
         if self.state != SessionState::Fresh {
             return Err(IngestError::InvalidState { state: self.state });
         }
@@ -319,21 +325,34 @@ impl ReceivePackHandler {
         })?;
 
         let mut buffered = io::BufReader::new(pack_data);
-        let odb_handle = self.odb.to_handle_arc();
 
-        let outcome = gix_pack::Bundle::write_to_directory(
-            &mut buffered,
-            Some(&pack_dir),
-            &mut gix_features::progress::Discard,
-            &AtomicBool::new(false),
-            Some(odb_handle),
-            gix_pack::bundle::write::Options {
-                thread_limit: self.options.thread_limit,
-                iteration_mode: self.options.iteration_mode,
-                object_hash: self.options.object_hash,
-                ..Default::default()
-            },
-        )
+        let options = gix_pack::bundle::write::Options {
+            thread_limit: self.options.thread_limit,
+            iteration_mode: self.options.iteration_mode,
+            object_hash: self.options.object_hash,
+            ..Default::default()
+        };
+
+        let outcome = if session_config.no_thin {
+            gix_pack::Bundle::write_to_directory(
+                &mut buffered,
+                Some(&pack_dir),
+                &mut gix_features::progress::Discard,
+                &AtomicBool::new(false),
+                None::<gix_odb::store::Handle<Arc<gix_odb::Store>>>,
+                options,
+            )
+        } else {
+            let odb_handle = self.odb.to_handle_arc();
+            gix_pack::Bundle::write_to_directory(
+                &mut buffered,
+                Some(&pack_dir),
+                &mut gix_features::progress::Discard,
+                &AtomicBool::new(false),
+                Some(odb_handle),
+                options,
+            )
+        }
         .map_err(IngestError::MalformedPack)?;
 
         let object_count = outcome.index.num_objects;
@@ -648,10 +667,11 @@ impl ReceivePackHandler {
 // ---------------------------------------------------------------------------
 
 impl ReceivePackHandler {
-    /// Execute an atomic ref transaction for the given updates.
+    /// Execute a ref transaction for the given updates, dispatching based on session config.
     ///
-    /// Maps each [`Update`](super::Update) to a [`RefEdit`](gix_ref::transaction::RefEdit)
-    /// and executes them as a single atomic transaction via the ref store.
+    /// If `session_config.atomic` is true, executes all ref updates as a single atomic
+    /// transaction — all succeed or all fail. Otherwise, processes each ref independently
+    /// (per-ref mode), continuing on CAS failures.
     ///
     /// Requires a prior successful [`ingest_pack`](Self::ingest_pack) call (state must be
     /// [`SessionState::PackIngested`]).
@@ -662,10 +682,36 @@ impl ReceivePackHandler {
     /// # Errors
     ///
     /// Returns [`TransactError::NotIngested`] if the handler is not in the `PackIngested` state.
-    /// Returns [`TransactError::Prepare`] if the transaction preparation fails (e.g., CAS mismatch).
-    /// Returns [`TransactError::Commit`] if the transaction commit fails.
+    /// Returns [`TransactError::Prepare`] if an unrecoverable transaction preparation error occurs.
+    /// Returns [`TransactError::Commit`] if an unrecoverable transaction commit error occurs.
     /// Returns [`TransactError::KeepFileRemoval`] if the `.keep` file cannot be removed after success.
-    pub fn transact_refs(&mut self, updates: &[super::Update]) -> Result<TransactionResult, TransactError> {
+    pub fn transact_refs(
+        &mut self,
+        updates: &[super::Update],
+        session_config: &super::SessionConfig,
+    ) -> Result<TransactionResult, TransactError> {
+        if session_config.atomic {
+            self.transact_refs_atomic(updates)
+        } else {
+            self.transact_refs_per_ref(updates)
+        }
+    }
+
+    /// Execute all ref updates as a single atomic transaction.
+    ///
+    /// All updates succeed or all fail. If any single ref update fails (CAS mismatch
+    /// or other error), all refs are reported as rejected with an atomic failure message.
+    ///
+    /// Requires state to be [`SessionState::PackIngested`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransactError::NotIngested`] if the handler is not in the `PackIngested` state.
+    /// Returns [`TransactError::KeepFileRemoval`] if the `.keep` file cannot be removed after success.
+    pub fn transact_refs_atomic(
+        &mut self,
+        updates: &[super::Update],
+    ) -> Result<TransactionResult, TransactError> {
         if self.state != SessionState::PackIngested {
             return Err(TransactError::NotIngested);
         }
@@ -674,19 +720,40 @@ impl ReceivePackHandler {
         let edits: Vec<gix_ref::transaction::RefEdit> = updates.iter().map(update_to_ref_edit).collect();
 
         // Execute the transaction: prepare then commit.
-        let prepared = self
-            .ref_store
-            .transaction()
-            .prepare(
-                edits,
-                gix_lock::acquire::Fail::Immediately,
-                gix_lock::acquire::Fail::Immediately,
-            )
-            .map_err(|e| TransactError::Prepare(Box::new(e)))?;
+        let prepared = match self.ref_store.transaction().prepare(
+            edits,
+            gix_lock::acquire::Fail::Immediately,
+            gix_lock::acquire::Fail::Immediately,
+        ) {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                // Atomic mode: all refs rejected on any failure.
+                let reason = format!("atomic transaction failed: {e}");
+                let ref_results = updates
+                    .iter()
+                    .map(|update| RefUpdateResult {
+                        ref_name: update.ref_name.clone(),
+                        status: RefUpdateStatus::Rejected { reason: reason.clone() },
+                    })
+                    .collect();
+                self.state = SessionState::Committed;
+                return Ok(TransactionResult { ref_results });
+            }
+        };
 
-        prepared
-            .commit(None)
-            .map_err(|e| TransactError::Commit(Box::new(e)))?;
+        if let Err(e) = prepared.commit(None) {
+            // Atomic mode: all refs rejected on commit failure.
+            let reason = format!("atomic transaction failed: {e}");
+            let ref_results = updates
+                .iter()
+                .map(|update| RefUpdateResult {
+                    ref_name: update.ref_name.clone(),
+                    status: RefUpdateStatus::Rejected { reason: reason.clone() },
+                })
+                .collect();
+            self.state = SessionState::Committed;
+            return Ok(TransactionResult { ref_results });
+        }
 
         // Remove the .keep file.
         if let Some(keep_path) = self.ingest_outcome.as_ref().and_then(|o| o.keep_path.as_ref()) {
@@ -707,6 +774,84 @@ impl ReceivePackHandler {
                 status: RefUpdateStatus::Ok,
             })
             .collect();
+
+        Ok(TransactionResult { ref_results })
+    }
+
+    /// Process each ref update independently as its own single-ref transaction.
+    ///
+    /// A CAS failure on one ref records it as [`RefUpdateStatus::Rejected`] but does not
+    /// prevent other refs from updating. Refs that succeed are reported as
+    /// [`RefUpdateStatus::Ok`].
+    ///
+    /// Requires state to be [`SessionState::PackIngested`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransactError::NotIngested`] if the handler is not in the `PackIngested` state.
+    /// Returns [`TransactError::KeepFileRemoval`] if the `.keep` file cannot be removed after success.
+    pub fn transact_refs_per_ref(
+        &mut self,
+        updates: &[super::Update],
+    ) -> Result<TransactionResult, TransactError> {
+        if self.state != SessionState::PackIngested {
+            return Err(TransactError::NotIngested);
+        }
+
+        let mut ref_results = Vec::with_capacity(updates.len());
+        let mut any_succeeded = false;
+
+        for update in updates {
+            let edit = update_to_ref_edit(update);
+
+            // Execute a single-ref transaction independently.
+            let prepare_result = self.ref_store.transaction().prepare(
+                vec![edit],
+                gix_lock::acquire::Fail::Immediately,
+                gix_lock::acquire::Fail::Immediately,
+            );
+
+            match prepare_result {
+                Ok(prepared) => match prepared.commit(None) {
+                    Ok(_) => {
+                        any_succeeded = true;
+                        ref_results.push(RefUpdateResult {
+                            ref_name: update.ref_name.clone(),
+                            status: RefUpdateStatus::Ok,
+                        });
+                    }
+                    Err(e) => {
+                        ref_results.push(RefUpdateResult {
+                            ref_name: update.ref_name.clone(),
+                            status: RefUpdateStatus::Rejected {
+                                reason: format!("commit failed: {e}"),
+                            },
+                        });
+                    }
+                },
+                Err(e) => {
+                    ref_results.push(RefUpdateResult {
+                        ref_name: update.ref_name.clone(),
+                        status: RefUpdateStatus::Rejected {
+                            reason: format!("lock/cas failed: {e}"),
+                        },
+                    });
+                }
+            }
+        }
+
+        // Remove the .keep file if at least one ref succeeded.
+        if any_succeeded {
+            if let Some(keep_path) = self.ingest_outcome.as_ref().and_then(|o| o.keep_path.as_ref()) {
+                std::fs::remove_file(keep_path).map_err(|source| TransactError::KeepFileRemoval {
+                    path: keep_path.clone(),
+                    source,
+                })?;
+            }
+        }
+
+        // Transition state to Committed.
+        self.state = SessionState::Committed;
 
         Ok(TransactionResult { ref_results })
     }
@@ -850,6 +995,11 @@ pub(crate) fn update_to_ref_edit(update: &super::Update) -> gix_ref::transaction
 impl super::Delegate for ReceivePackHandler {
     /// Run the full receive-pack pipeline: ingest pack → connectivity check → ref transaction.
     ///
+    /// For delete-only pushes (all updates have `new_id == zero_id`), pack ingestion and
+    /// connectivity checking are skipped entirely — there is no pack data to ingest and
+    /// no new ref targets to verify. The handler transitions directly to the ref transaction
+    /// stage for the deletion edits.
+    ///
     /// Maps pipeline failures to appropriate [`Response`](super::Response) values:
     /// - Pack ingestion failure → `UnpackStatus::Error`, all refs `Rejected`
     /// - Connectivity failure → `UnpackStatus::Error`, all refs `Rejected`
@@ -860,44 +1010,55 @@ impl super::Delegate for ReceivePackHandler {
         request: &super::Request,
         pack_data: &mut dyn io::Read,
     ) -> Result<super::Response, Box<dyn std::error::Error + Send + Sync + 'static>> {
-        // Step 1: Ingest pack data
-        if let Err(e) = self.ingest_pack(pack_data) {
-            let error_msg = e.to_string();
-            let ref_statuses = request
-                .updates
-                .iter()
-                .map(|update| super::RefStatus::Rejected {
-                    ref_name: update.ref_name.clone(),
-                    message: format!("unpack failed: {error_msg}").into(),
-                })
-                .collect();
-            return Ok(super::Response {
-                unpack_status: super::UnpackStatus::Error(error_msg.into()),
-                ref_statuses,
-                sideband_messages: Vec::new(),
-            });
+        let session_config = super::SessionConfig::from_request(request);
+        let is_delete_only = request.updates.iter().all(|u| u.new_id.is_null());
+
+        if is_delete_only {
+            // Delete-only push: no pack data expected, skip ingestion and connectivity.
+            // Transition state to PackIngested so transact_refs can proceed.
+            self.state = SessionState::PackIngested;
+        } else {
+            // Normal flow: ingest pack data then verify connectivity.
+
+            // Step 1: Ingest pack data
+            if let Err(e) = self.ingest_pack(pack_data, &session_config) {
+                let error_msg = e.to_string();
+                let ref_statuses = request
+                    .updates
+                    .iter()
+                    .map(|update| super::RefStatus::Rejected {
+                        ref_name: update.ref_name.clone(),
+                        message: format!("unpack failed: {error_msg}").into(),
+                    })
+                    .collect();
+                return Ok(super::Response {
+                    unpack_status: super::UnpackStatus::Error(error_msg.into()),
+                    ref_statuses,
+                    sideband_messages: Vec::new(),
+                });
+            }
+
+            // Step 2: Connectivity check
+            if let Err(e) = self.check_connectivity(&request.updates) {
+                let error_msg = e.to_string();
+                let ref_statuses = request
+                    .updates
+                    .iter()
+                    .map(|update| super::RefStatus::Rejected {
+                        ref_name: update.ref_name.clone(),
+                        message: format!("connectivity check failed: {error_msg}").into(),
+                    })
+                    .collect();
+                return Ok(super::Response {
+                    unpack_status: super::UnpackStatus::Error(error_msg.into()),
+                    ref_statuses,
+                    sideband_messages: Vec::new(),
+                });
+            }
         }
 
-        // Step 2: Connectivity check
-        if let Err(e) = self.check_connectivity(&request.updates) {
-            let error_msg = e.to_string();
-            let ref_statuses = request
-                .updates
-                .iter()
-                .map(|update| super::RefStatus::Rejected {
-                    ref_name: update.ref_name.clone(),
-                    message: format!("connectivity check failed: {error_msg}").into(),
-                })
-                .collect();
-            return Ok(super::Response {
-                unpack_status: super::UnpackStatus::Error(error_msg.into()),
-                ref_statuses,
-                sideband_messages: Vec::new(),
-            });
-        }
-
-        // Step 3: Ref transaction
-        match self.transact_refs(&request.updates) {
+        // Step 3: Ref transaction (both delete-only and normal paths converge here)
+        match self.transact_refs(&request.updates, &session_config) {
             Ok(transaction_result) => {
                 let ref_statuses = transaction_result
                     .ref_results
