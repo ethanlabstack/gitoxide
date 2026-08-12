@@ -90,10 +90,13 @@ pub fn write_ls_refs_response(mut output: impl io::Write, request: &LsRefs, refs
 /// This is shared between the blocking [`write_fetch_response`] and the async variant
 /// in [`super::async_io`] to avoid duplicating the section-framing logic.
 ///
-/// When `has_pack_data` is true, each section is terminated with a delimiter packet (`0001`)
-/// to signal that another section follows. When false, the last section omits the trailing
-/// delimiter — the caller's final flush packet (`0000`) terminates the response instead.
-/// This matches the V2 protocol framing expected by clients.
+/// Per the V2 protocol spec (gitprotocol-v2), the fetch response has two forms:
+/// 1. `acknowledgements flush-pkt` — no ready, no pack follows
+/// 2. `[acknowledgments delim-pkt] [shallow-info delim-pkt] [wanted-refs delim-pkt] packfile flush-pkt`
+///
+/// When `has_pack_data` is false (form 1), only the acknowledgments section is written
+/// (no delimiter after it — the caller writes flush). Shallow-info and wanted-refs are
+/// omitted because the spec requires them only when a packfile section follows.
 pub(crate) fn write_fetch_metadata_sections(
     output: impl io::Write,
     acknowledgements: &[Acknowledgement],
@@ -101,40 +104,29 @@ pub(crate) fn write_fetch_metadata_sections(
     wanted_refs: &[WantedRef],
     has_pack_data: bool,
 ) -> Result<(), Error> {
-    // Use section writers internally for the actual content.
-    // We still manage delimiter/flush framing at this level since
-    // it depends on cross-section awareness (which section is last, etc.).
     let mut output = output;
-
-    let sections: [(&[u8], bool); 3] = [
-        (b"acknowledgments" as &[u8], !acknowledgements.is_empty()),
-        (b"shallow-info", !shallow_updates.is_empty()),
-        (b"wanted-refs", !wanted_refs.is_empty()),
-    ];
-    let last_active_idx = sections.iter().rposition(|(_, active)| *active);
 
     if AckSection::has_content(acknowledgements) {
         AckSection.write(&mut output, acknowledgements)?;
-        let is_last = last_active_idx == Some(0);
-        if has_pack_data || !is_last {
+        if has_pack_data {
             encode::delim_to_write(&mut output)?;
         }
+    }
+
+    // Per protocol V2 spec: shallow-info and wanted-refs are only included
+    // when a packfile section is also present in the response.
+    if !has_pack_data {
+        return Ok(());
     }
 
     if ShallowSection::has_content(shallow_updates) {
         ShallowSection.write(&mut output, shallow_updates)?;
-        let is_last = last_active_idx == Some(1);
-        if has_pack_data || !is_last {
-            encode::delim_to_write(&mut output)?;
-        }
+        encode::delim_to_write(&mut output)?;
     }
 
     if WantedRefsSection::has_content(wanted_refs) {
         WantedRefsSection.write(&mut output, wanted_refs)?;
-        let is_last = last_active_idx == Some(2);
-        if has_pack_data || !is_last {
-            encode::delim_to_write(&mut output)?;
-        }
+        encode::delim_to_write(&mut output)?;
     }
 
     Ok(())

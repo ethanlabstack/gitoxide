@@ -450,7 +450,9 @@ async fn write_fetch_response_without_pack_data_writes_only_metadata_sections(
     let mut reader =
         StreamingPeekableIter::new(output_bytes.as_slice(), &[PacketLineRef::Flush], false);
 
-    // Acknowledgments section
+    // Per protocol V2 spec: when no packfile follows (form 1), only the
+    // acknowledgments section is written, terminated by flush. Shallow-info
+    // and wanted-refs are omitted (they require a packfile to be present).
     assert_eq!(
         next_text_line(&mut reader)?.as_slice(),
         b"acknowledgments",
@@ -461,25 +463,11 @@ async fn write_fetch_response_without_pack_data_writes_only_metadata_sections(
         b"NAK",
         "acknowledgments section should contain NAK"
     );
-    expect_delimiter(&mut reader)?;
 
-    // Shallow-info section (last section, no pack follows)
-    assert_eq!(
-        next_text_line(&mut reader)?.as_slice(),
-        b"shallow-info",
-        "shallow-info section should follow acknowledgments"
-    );
-    let expected_shallow = format!("shallow {shallow_id}");
-    assert_eq!(
-        next_text_line(&mut reader)?.as_slice(),
-        expected_shallow.as_bytes(),
-        "shallow-info should contain shallow line with correct id"
-    );
-
-    // No packfile section - should go directly to flush (no trailing delimiter on last section)
+    // Response ends with flush directly after acks (no delimiter, no shallow-info)
     assert!(
         reader.read_line().is_none(),
-        "no packfile section should be present; response should end with flush"
+        "response should end with flush after acknowledgments (no shallow-info without packfile)"
     );
     assert_eq!(
         reader.stopped_at(),

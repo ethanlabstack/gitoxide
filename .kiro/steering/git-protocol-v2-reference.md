@@ -27,10 +27,10 @@ Two forms:
 
 ## Acknowledgments section rules
 
-- Omitted entirely when client sends `done` and server is ready (fresh clone or ready state).
-- Contains `NAK` when no common objects found (ongoing negotiation).
-- Contains `ACK <oid>` for each common object.
-- Contains `ready` when server has found a cut point and will send a pack.
+- **MUST be omitted entirely** when client sends `done` (server proceeds directly to packfile).
+- Contains `NAK` when no common objects found (ongoing negotiation, done=false).
+- Contains `ACK <oid>` for each common object (ongoing negotiation, done=false).
+- Contains `ready` when server has found a cut point and will send a pack (ongoing negotiation).
 - Cannot have both `ACK` lines and `NAK` in the same response.
 - Server MAY omit `ACK` lines when sending `ready` (optimization).
 

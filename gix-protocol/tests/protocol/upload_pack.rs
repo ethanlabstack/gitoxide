@@ -766,6 +766,7 @@ fn into_output_with_repository_pack_excludes_common_have_history() -> crate::Res
     let request = Fetch {
         wants: vec![fixture.commit_three],
         haves: vec![fixture.commit_one],
+        done: true,
         ..Default::default()
     };
 
@@ -797,6 +798,7 @@ fn into_output_with_repository_pack_peels_tag_wants_to_commits() -> crate::Resul
     let request = Fetch {
         wants: vec![fixture.tag_three],
         haves: vec![fixture.commit_one],
+        done: true,
         ..Default::default()
     };
 
@@ -877,6 +879,7 @@ fn serve_fetch_with_pack_sideband() -> crate::Result {
     let mut output = Vec::new();
     let mut fetch_output = FetchOutput::new(Cursor::new(b"PACK\0\0\0\0".to_vec()));
     fetch_output.acknowledgements.push(Acknowledgement::Common(common_id));
+    fetch_output.acknowledgements.push(Acknowledgement::Ready);
     fetch_output.wanted_refs.push(WantedRef { id: wanted_id, path: "refs/heads/main".into() });
     let mut delegate = MockDelegate {
         fetch_output: Some(fetch_output),
@@ -887,7 +890,7 @@ fn serve_fetch_with_pack_sideband() -> crate::Result {
     assert_eq!(
         outcome,
         Outcome::Fetch {
-            acknowledgements_sent: 1,
+            acknowledgements_sent: 2,
             shallow_updates_sent: 0,
             wanted_refs_sent: 1,
             pack_bytes_sent: 8,
@@ -898,6 +901,7 @@ fn serve_fetch_with_pack_sideband() -> crate::Result {
     let mut reader = StreamingPeekableIter::new(output.as_slice(), &[PacketLineRef::Flush], false);
     assert_eq!(next_text_line(&mut reader)?.as_bstr(), "acknowledgments".as_bytes().as_bstr());
     assert_eq!(next_text_line(&mut reader)?.as_bstr(), format!("ACK {common_id} common").as_bytes().as_bstr());
+    assert_eq!(next_text_line(&mut reader)?.as_bstr(), "ready".as_bytes().as_bstr());
     expect_delimiter(&mut reader)?;
     assert_eq!(next_text_line(&mut reader)?.as_bstr(), "wanted-refs".as_bytes().as_bstr());
     assert_eq!(next_text_line(&mut reader)?.as_bstr(), format!("{wanted_id} refs/heads/main").as_bytes().as_bstr());
@@ -926,10 +930,9 @@ fn negotiate_fetch_done_with_common_haves_should_end_with_ready() -> crate::Resu
 
     let negotiation = negotiate_fetch_with_repository(&request, &refs, |id| known_objects.contains(id))?;
 
-    assert_eq!(
-        negotiation.acknowledgements,
-        vec![Acknowledgement::Common(known_have), Acknowledgement::Ready],
-        "when done=true and common haves exist, acknowledgements must end with Ready to signal packfile follows"
+    assert!(
+        negotiation.acknowledgements.is_empty(),
+        "when done=true, acknowledgements MUST be empty (section omitted per protocol spec)"
     );
     Ok(())
 }
@@ -984,10 +987,9 @@ fn negotiate_fetch_done_with_mixed_known_unknown_haves_should_have_common_then_r
 
     let negotiation = negotiate_fetch_with_repository(&request, &refs, |id| known_objects.contains(id))?;
 
-    assert_eq!(
-        negotiation.acknowledgements,
-        vec![Acknowledgement::Common(known_have), Acknowledgement::Ready],
-        "when done=true with mix of known/unknown haves, acknowledgements must be [Common(known), Ready]"
+    assert!(
+        negotiation.acknowledgements.is_empty(),
+        "when done=true, acknowledgements MUST be empty regardless of haves (section omitted per protocol spec)"
     );
     Ok(())
 }

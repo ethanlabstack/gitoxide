@@ -52,22 +52,20 @@ impl NegotiationState {
     /// |-------|-------------------------|-----------------------------------|
     /// | true  | true                    | [] (omit ack section entirely)    |
     /// | true  | false                   | [Common(...), ..., Ready]         |
+    /// | done  | common_haves.is_empty() | Result                            |
+    /// |-------|-------------------------|-----------------------------------|
+    /// | true  | any                     | [] (MUST omit per spec)           |
     /// | false | true                    | [NAK]                             |
     /// | false | false                   | [Common(...), ...]  (no Ready)    |
+    ///
+    /// Per gitprotocol-v2: "If the client determines that it is finished with
+    /// negotiations by sending a 'done' line [...], the acknowledgments section
+    /// MUST be omitted from the server's response."
     pub fn acknowledgements(&self) -> Vec<Acknowledgement> {
         if self.done {
-            if self.common_haves_ordered.is_empty() {
-                Vec::new()
-            } else {
-                let mut acks: Vec<_> = self
-                    .common_haves_ordered
-                    .iter()
-                    .copied()
-                    .map(Acknowledgement::Common)
-                    .collect();
-                acks.push(Acknowledgement::Ready);
-                acks
-            }
+            // Spec requires omitting the acknowledgments section entirely when done=true.
+            // The server proceeds directly to packfile (or shallow-info/wanted-refs).
+            Vec::new()
         } else if self.common_haves_ordered.is_empty() {
             vec![Acknowledgement::Nak]
         } else {

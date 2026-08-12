@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 1e8c0f4232920337fd9475d5c1220c74368b5d3c6d9cc02118b5632b52cfeddb # shrinks to done = true, common_haves = [Sha1(0000000000000000000000000000000000000000)]

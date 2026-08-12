@@ -181,6 +181,10 @@ impl FetchNegotiation {
     ///
     /// Pack generation traverses all commits reachable from negotiated wants and from peeled `want-ref`
     /// targets while excluding commits reachable from acknowledged `have` lines.
+    ///
+    /// When `request.done` is false (ongoing negotiation), pack generation is skipped entirely
+    /// and the output contains only metadata (acknowledgements, wanted-refs). Per protocol V2,
+    /// pack data is only sent when the client has signaled negotiation is complete.
     pub fn into_output_with_repository_pack<Find>(
         self,
         request: &Fetch,
@@ -190,6 +194,9 @@ impl FetchNegotiation {
     where
         Find: gix_object::Find + gix_pack::Find + Clone,
     {
+        if !request.done {
+            return Ok(self.into_output());
+        }
         let pack_data = generate_fetch_pack_data_with_repository(request, &self, object_database, object_hash)?;
         let mut output = self.into_output();
         output.pack_data = pack_data.map(|pack| Box::new(io::Cursor::new(pack)) as Box<dyn io::Read + Send + 'static>);
@@ -526,7 +533,20 @@ pub fn serve_v2(
             use state::{v2, Either};
 
             let parsed = v2::Parsed { request };
-            let negotiated = parsed.negotiate(delegate)?;
+            let mut negotiated = parsed.negotiate(delegate)?;
+
+            // Protocol V2 invariant: pack data may only be sent when the ack
+            // section either contains `ready` OR is omitted entirely (fresh clone).
+            // If the delegate returns pack data with a non-empty ack section that
+            // lacks ready (ongoing negotiation), strip it to prevent the client from
+            // seeing sections after a non-ready ack response.
+            let has_ready = negotiated.output.acknowledgements.iter().any(|a| {
+                matches!(a, crate::fetch::response::Acknowledgement::Ready)
+            });
+            let acks_present_without_ready = !negotiated.output.acknowledgements.is_empty() && !has_ready;
+            if acks_present_without_ready {
+                negotiated.output.pack_data = None;
+            }
 
             // Capture section counts before consuming the state via resolve().
             let acknowledgements_sent = negotiated.output.acknowledgements.len();
@@ -940,17 +960,12 @@ mod tests {
                     .collect();
 
                 if done {
-                    if unique_haves.is_empty() {
-                        prop_assert!(acks.is_empty(), "done=true with no common haves must produce empty acknowledgements, got {:?}", acks);
-                    } else {
-                        prop_assert!(!acks.is_empty());
-                        prop_assert_eq!(acks.last().copied(), Some(Acknowledgement::Ready));
-                        let common_entries = &acks[..acks.len() - 1];
-                        prop_assert_eq!(common_entries.len(), unique_haves.len());
-                        for (entry, expected_id) in common_entries.iter().zip(unique_haves.iter()) {
-                            prop_assert_eq!(*entry, Acknowledgement::Common(*expected_id));
-                        }
-                    }
+                    // Per spec: when done=true, acknowledgments MUST be omitted entirely.
+                    prop_assert!(
+                        acks.is_empty(),
+                        "done=true must always produce empty acknowledgements (section omitted per spec), got {:?}",
+                        acks
+                    );
                 } else {
                     if unique_haves.is_empty() {
                         prop_assert_eq!(acks, vec![Acknowledgement::Nak]);
